@@ -174,7 +174,7 @@ func (h *updateHandler) dispatchCommand(ctx context.Context, msg *tg.Message, fr
 // cmdStart handles /start.
 func (b *Bot) cmdStart(ctx context.Context, fromID, chatID int64, peer tg.InputPeerClass) {
 	if !b.st.IsAllowed(fromID) {
-		b.sendText(ctx, peer, "⛔ You are not authorised to use this bot.")
+		b.sendText(ctx, peer, "⛔ You are not authorized to use this bot.")
 		return
 	}
 	b.sendText(ctx, peer, "⚡ *goleecher* ready!\n\nCommands:\n/leech <url|magnet> [document] — download & upload\n/status — show active jobs\n/cancel <id> — cancel a job")
@@ -183,7 +183,7 @@ func (b *Bot) cmdStart(ctx context.Context, fromID, chatID int64, peer tg.InputP
 // cmdLeech handles /leech.
 func (b *Bot) cmdLeech(ctx context.Context, fromID, chatID int64, peer tg.InputPeerClass, url string, asDoc bool) {
 	if !b.st.IsAllowed(fromID) {
-		b.sendText(ctx, peer, "⛔ You are not authorised to use this bot.")
+		b.sendText(ctx, peer, "⛔ You are not authorized to use this bot.")
 		return
 	}
 
@@ -260,7 +260,7 @@ func (b *Bot) runJob(ctx context.Context, job *store.Job, peer tg.InputPeerClass
 // cmdStatus handles /status.
 func (b *Bot) cmdStatus(ctx context.Context, fromID int64, peer tg.InputPeerClass) {
 	if !b.st.IsAllowed(fromID) {
-		b.sendText(ctx, peer, "⛔ You are not authorised.")
+		b.sendText(ctx, peer, "⛔ You are not authorized.")
 		return
 	}
 
@@ -284,7 +284,7 @@ func (b *Bot) cmdStatus(ctx context.Context, fromID int64, peer tg.InputPeerClas
 // cmdCancel handles /cancel.
 func (b *Bot) cmdCancel(ctx context.Context, fromID int64, peer tg.InputPeerClass, jobID string) {
 	if !b.st.IsAllowed(fromID) {
-		b.sendText(ctx, peer, "⛔ You are not authorised.")
+		b.sendText(ctx, peer, "⛔ You are not authorized.")
 		return
 	}
 	if err := b.manager.CancelJob(jobID, fromID); err != nil {

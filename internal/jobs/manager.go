@@ -103,7 +103,7 @@ func (m *Manager) CancelJob(id string, requesterID int64) error {
 		return fmt.Errorf("job %s not found", id)
 	}
 	if j.UserID != requesterID && !m.st.IsAdmin(requesterID) {
-		return fmt.Errorf("not authorised to cancel job %s", id)
+		return fmt.Errorf("not authorized to cancel job %s", id)
 	}
 	if j.Status != store.StatusDownloading &&
 		j.Status != store.StatusUploading &&
