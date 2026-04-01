@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math/rand"
 	"mime"
 	"os"
 	"path/filepath"
@@ -85,7 +84,7 @@ func (u *uploader) uploadFile(ctx context.Context, filePath, filename string, si
 	}
 	defer f.Close()
 
-	fileID := rand.Int63()
+	fileID := cryptoRandInt63()
 	totalParts := int((size + partSize - 1) / partSize)
 	isBig := size > bigFileThreshold
 
@@ -212,7 +211,7 @@ func (u *uploader) sendFile(ctx context.Context, peer tg.InputPeerClass, inputFi
 	_, err := u.api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
 		Peer:     peer,
 		Media:    media,
-		RandomID: rand.Int63(),
+		RandomID: cryptoRandInt63(),
 		Message:  "",
 	})
 	return err

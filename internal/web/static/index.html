@@ -43,6 +43,15 @@
         <tbody id="jobs-tbody"></tbody>
     </table>
     <script>
+        function escapeHtml(s) {
+            return String(s)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
         function humanBytes(b) {
             if (!b) return '0 B';
             const units = ['B','KB','MB','GB','TB'];
@@ -73,20 +82,25 @@
             }
 
             jobsRes.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-            tbody.innerHTML = jobsRes.map(j => `
-                <tr>
-                    <td><code>${j.id}</code></td>
-                    <td title="${j.url}">${j.filename || j.url.slice(0, 40)}</td>
-                    <td><span class="badge ${j.status}">${j.status}</span></td>
+            tbody.innerHTML = jobsRes.map(j => {
+                const id       = escapeHtml(j.id);
+                const filename = escapeHtml(j.filename || j.url.slice(0, 40));
+                const urlAttr  = escapeHtml(j.url);
+                const status   = escapeHtml(j.status);
+                const progress = j.progress.toFixed(1);
+                return `<tr>
+                    <td><code>${id}</code></td>
+                    <td title="${urlAttr}">${filename}</td>
+                    <td><span class="badge ${status}">${status}</span></td>
                     <td style="min-width:120px">
                         <div style="display:flex;align-items:center;gap:8px">
-                            <div class="progress-bar"><div class="progress-fill" style="width:${j.progress.toFixed(1)}%"></div></div>
-                            <span style="white-space:nowrap">${j.progress.toFixed(1)}%</span>
+                            <div class="progress-bar"><div class="progress-fill" style="width:${progress}%"></div></div>
+                            <span style="white-space:nowrap">${progress}%</span>
                         </div>
                     </td>
                     <td>${humanBytes(j.speed)}/s</td>
-                </tr>
-            `).join('');
+                </tr>`;
+            }).join('');
         }
 
         refresh();

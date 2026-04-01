@@ -4,7 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math/rand"
+	"crypto/rand"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"strings"
@@ -313,9 +314,19 @@ func (b *Bot) sendText(ctx context.Context, peer tg.InputPeerClass, text string)
 	_, err := b.api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 		Peer:     peer,
 		Message:  text,
-		RandomID: rand.Int63(),
+		RandomID: cryptoRandInt63(),
 	})
 	if err != nil {
 		log.Printf("sendText error: %v", err)
 	}
+}
+
+func cryptoRandInt63() int64 {
+var b [8]byte
+_, _ = rand.Read(b[:])
+v := int64(binary.LittleEndian.Uint64(b[:]))
+if v < 0 {
+v = -v
+}
+return v
 }

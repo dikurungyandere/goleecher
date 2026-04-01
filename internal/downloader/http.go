@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"time"
 
@@ -293,7 +292,7 @@ func filenameFromURL(url string, resp *http.Response) string {
 func parseContentDisposition(cd string) (string, map[string]string, error) {
 	params := make(map[string]string)
 	// Very minimal parser
-	for i, part := range splitComma(cd) {
+	for i, part := range splitSemicolon(cd) {
 		part = trimSpace(part)
 		if i == 0 {
 			continue
@@ -311,7 +310,7 @@ func parseContentDisposition(cd string) (string, map[string]string, error) {
 	return "", params, nil
 }
 
-func splitComma(s string) []string {
+func splitSemicolon(s string) []string {
 	var res []string
 	cur := ""
 	for _, r := range s {
@@ -356,16 +355,20 @@ func sanitizeFilename(name string) string {
 	result := make([]byte, 0, len(name))
 	for i := 0; i < len(name); i++ {
 		c := name[i]
-		if c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|' {
+		switch {
+		case c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|':
 			result = append(result, '_')
-		} else {
+		case c < 0x20 || c == 0x7f:
+			// Replace control characters with underscore.
+			result = append(result, '_')
+		default:
 			result = append(result, c)
 		}
 	}
 	if len(result) == 0 {
 		return "download"
 	}
-	// avoid length > 255
+	// Avoid filenames longer than 255 bytes; preserve extension.
 	if len(result) > 200 {
 		ext := ""
 		for i := len(result) - 1; i >= 0 && i >= len(result)-10; i-- {
@@ -376,6 +379,5 @@ func sanitizeFilename(name string) string {
 		}
 		result = append(result[:200], []byte(ext)...)
 	}
-	quoted := strconv.Quote(string(result))
-	return quoted[1 : len(quoted)-1]
+	return string(result)
 }
