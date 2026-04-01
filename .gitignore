@@ -1,0 +1,26 @@
+# Binaries
+goleecher
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Build output
+/dist/
+
+# Go workspace
+go.work
+go.work.sum
+
+# Session and temp files
+*.json
+/tmp/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
