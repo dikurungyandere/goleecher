@@ -153,21 +153,46 @@ func (h *updateHandler) dispatchCommand(ctx context.Context, msg *tg.Message, fr
 	case "/start":
 		bot.cmdStart(ctx, fromID, chatID, peer)
 	case "/leech":
-		if len(parts) < 2 {
-			bot.sendText(ctx, peer, "Usage: /leech <url|magnet> [document] [zip]")
-			return
-		}
-		url := parts[1]
+		var url string
 		var asDoc, asZip bool
-		for _, flag := range parts[2:] {
-			switch strings.ToLower(flag) {
-			case "document":
-				asDoc = true
-			case "zip":
-				asZip = true
+
+		// Determine if the first argument is a URL/magnet or a flag.
+		if len(parts) >= 2 {
+			candidate := parts[1]
+			if !strings.EqualFold(candidate, "document") && !strings.EqualFold(candidate, "zip") {
+				url = candidate
+				for _, flag := range parts[2:] {
+					switch strings.ToLower(flag) {
+					case "document":
+						asDoc = true
+					case "zip":
+						asZip = true
+					}
+				}
+			} else {
+				for _, flag := range parts[1:] {
+					switch strings.ToLower(flag) {
+					case "document":
+						asDoc = true
+					case "zip":
+						asZip = true
+					}
+				}
 			}
 		}
-		bot.cmdLeech(ctx, fromID, chatID, peer, url, asDoc, asZip)
+
+		if url != "" {
+			bot.cmdLeech(ctx, fromID, chatID, peer, url, asDoc, asZip)
+			return
+		}
+
+		// No URL provided: look for a .torrent document in the replied-to message.
+		replyHeader, ok := msg.ReplyTo.(*tg.MessageReplyHeader)
+		if !ok || replyHeader.ReplyToMsgID == 0 {
+			bot.sendText(ctx, peer, "Usage: /leech <url|magnet> [document] [zip]\nOr reply to a .torrent file with /leech [document] [zip]")
+			return
+		}
+		bot.cmdLeechTorrentReply(ctx, fromID, chatID, peer, replyHeader.ReplyToMsgID, asDoc, asZip)
 	case "/status":
 		bot.cmdStatus(ctx, fromID, peer)
 	case "/cancel":
@@ -187,7 +212,7 @@ func (b *Bot) cmdStart(ctx context.Context, fromID, chatID int64, peer tg.InputP
 		b.sendText(ctx, peer, "⛔ You are not authorized to use this bot.")
 		return
 	}
-	b.sendText(ctx, peer, "⚡ goleecher ready!\n\nCommands:\n/leech <url|magnet> [flags] — download & upload\n  flags: document — force document upload\n         zip      — zip multi-file torrent into one archive\n/status — show active jobs\n/cancel <id> — cancel a job")
+	b.sendText(ctx, peer, "⚡ goleecher ready!\n\nCommands:\n/leech <url|magnet> [flags] — download & upload\n  flags: document — force document upload\n         zip      — zip multi-file torrent into one archive\n/leech [flags]    — reply to a .torrent file to leech it\n/status — show active jobs\n/cancel <id> — cancel a job")
 }
 
 // cmdLeech handles /leech.
@@ -204,6 +229,52 @@ func (b *Bot) cmdLeech(ctx context.Context, fromID, chatID int64, peer tg.InputP
 
 	go func() {
 		b.runJob(jobCtx, job, peer, asDoc, asZip)
+	}()
+}
+
+// cmdLeechTorrentReply handles /leech when replying to a .torrent file message.
+func (b *Bot) cmdLeechTorrentReply(ctx context.Context, fromID, chatID int64, peer tg.InputPeerClass, replyMsgID int, asDoc, asZip bool) {
+	if !b.st.IsAllowed(fromID) {
+		b.sendText(ctx, peer, "⛔ You are not authorized to use this bot.")
+		return
+	}
+
+	repliedMsg, err := b.fetchMessage(ctx, peer, replyMsgID)
+	if err != nil {
+		b.sendText(ctx, peer, fmt.Sprintf("❌ Could not fetch replied message: %v", err))
+		return
+	}
+
+	msg, ok := repliedMsg.(*tg.Message)
+	if !ok {
+		b.sendText(ctx, peer, "❌ Replied message is not a regular message.")
+		return
+	}
+
+	mediaDoc, ok := msg.Media.(*tg.MessageMediaDocument)
+	if !ok {
+		b.sendText(ctx, peer, "❌ Replied message does not contain a document.")
+		return
+	}
+
+	doc, ok := mediaDoc.Document.(*tg.Document)
+	if !ok {
+		b.sendText(ctx, peer, "❌ Could not read the document from the replied message.")
+		return
+	}
+
+	if !isTorrentDocument(doc) {
+		b.sendText(ctx, peer, "❌ Replied document is not a .torrent file.")
+		return
+	}
+
+	job, jobCtx, cancel := b.manager.NewJob(ctx, fromID, chatID, torrentDocumentFilename(doc))
+	_ = cancel
+
+	b.sendText(ctx, peer, fmt.Sprintf("✅ Job %s created. Starting download…", job.ID))
+
+	go func() {
+		b.runJobFromTorrentDocument(jobCtx, job, peer, doc, asDoc, asZip)
 	}()
 }
 
@@ -240,14 +311,60 @@ func (b *Bot) runJob(ctx context.Context, job *store.Job, peer tg.InputPeerClass
 		return
 	}
 
+	updr := newUploader(b.api, b.cfg, b.manager, job.ID)
+	b.runJobAfterDownload(ctx, job, peer, localPath, asDoc, asZip, updr, progressFn)
+}
+
+// runJobFromTorrentDocument downloads a .torrent document from Telegram and then runs the torrent.
+func (b *Bot) runJobFromTorrentDocument(ctx context.Context, job *store.Job, peer tg.InputPeerClass, doc *tg.Document, asDoc, asZip bool) {
+	jobDir := filepath.Join(b.cfg.TempDir, job.ID)
+	if err := os.MkdirAll(jobDir, 0o755); err != nil {
+		b.manager.SetFailed(job.ID, err)
+		b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
+		return
+	}
+	defer os.RemoveAll(jobDir)
+
+	b.manager.SetDownloading(job.ID)
+	progressFn := b.manager.ProgressUpdater(job.ID)
+
+	// Download the .torrent file from Telegram first.
+	torrentFilePath := filepath.Join(jobDir, torrentDocumentFilename(doc))
+	if err := b.downloadTelegramDocument(ctx, doc, torrentFilePath); err != nil {
+		if ctx.Err() != nil {
+			b.manager.SetCancelled(job.ID)
+			b.sendText(ctx, peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
+		} else {
+			b.manager.SetFailed(job.ID, err)
+			b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed to fetch .torrent: %v", job.ID, err))
+		}
+		return
+	}
+
+	localPath, err := downloader.DownloadTorrentFile(ctx, torrentFilePath, jobDir, progressFn)
+	if err != nil {
+		if ctx.Err() != nil {
+			b.manager.SetCancelled(job.ID)
+			b.sendText(ctx, peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
+		} else {
+			b.manager.SetFailed(job.ID, err)
+			b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
+		}
+		return
+	}
+
+	updr := newUploader(b.api, b.cfg, b.manager, job.ID)
+	b.runJobAfterDownload(ctx, job, peer, localPath, asDoc, asZip, updr, progressFn)
+}
+
+// runJobAfterDownload handles stat → upload for a completed download.
+func (b *Bot) runJobAfterDownload(ctx context.Context, job *store.Job, peer tg.InputPeerClass, localPath string, asDoc, asZip bool, updr *uploader, progressFn jobs.ProgressFunc) {
 	info, err := os.Stat(localPath)
 	if err != nil {
 		b.manager.SetFailed(job.ID, err)
 		b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
 		return
 	}
-
-	updr := newUploader(b.api, b.cfg, b.manager, job.ID)
 
 	if info.IsDir() {
 		b.runJobDir(ctx, job, peer, localPath, asDoc, asZip, updr, progressFn)
