@@ -2,10 +2,10 @@ package bot
 
 import (
 	"context"
-	"fmt"
-	"log"
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +13,7 @@ import (
 	"github.com/gotd/td/tg"
 
 	"github.com/dikurungyandere/goleecher/internal/downloader"
+	"github.com/dikurungyandere/goleecher/internal/jobs"
 	"github.com/dikurungyandere/goleecher/internal/store"
 )
 
@@ -153,12 +154,20 @@ func (h *updateHandler) dispatchCommand(ctx context.Context, msg *tg.Message, fr
 		bot.cmdStart(ctx, fromID, chatID, peer)
 	case "/leech":
 		if len(parts) < 2 {
-			bot.sendText(ctx, peer, "Usage: /leech <url|magnet> [document]")
+			bot.sendText(ctx, peer, "Usage: /leech <url|magnet> [document] [zip]")
 			return
 		}
-		asDoc := len(parts) >= 3 && strings.ToLower(parts[len(parts)-1]) == "document"
 		url := parts[1]
-		bot.cmdLeech(ctx, fromID, chatID, peer, url, asDoc)
+		var asDoc, asZip bool
+		for _, flag := range parts[2:] {
+			switch strings.ToLower(flag) {
+			case "document":
+				asDoc = true
+			case "zip":
+				asZip = true
+			}
+		}
+		bot.cmdLeech(ctx, fromID, chatID, peer, url, asDoc, asZip)
 	case "/status":
 		bot.cmdStatus(ctx, fromID, peer)
 	case "/cancel":
@@ -178,11 +187,11 @@ func (b *Bot) cmdStart(ctx context.Context, fromID, chatID int64, peer tg.InputP
 		b.sendText(ctx, peer, "⛔ You are not authorized to use this bot.")
 		return
 	}
-	b.sendText(ctx, peer, "⚡ goleecher ready!\n\nCommands:\n/leech <url|magnet> [document] — download & upload\n/status — show active jobs\n/cancel <id> — cancel a job")
+	b.sendText(ctx, peer, "⚡ goleecher ready!\n\nCommands:\n/leech <url|magnet> [flags] — download & upload\n  flags: document — force document upload\n         zip      — zip multi-file torrent into one archive\n/status — show active jobs\n/cancel <id> — cancel a job")
 }
 
 // cmdLeech handles /leech.
-func (b *Bot) cmdLeech(ctx context.Context, fromID, chatID int64, peer tg.InputPeerClass, url string, asDoc bool) {
+func (b *Bot) cmdLeech(ctx context.Context, fromID, chatID int64, peer tg.InputPeerClass, url string, asDoc, asZip bool) {
 	if !b.st.IsAllowed(fromID) {
 		b.sendText(ctx, peer, "⛔ You are not authorized to use this bot.")
 		return
@@ -194,12 +203,12 @@ func (b *Bot) cmdLeech(ctx context.Context, fromID, chatID int64, peer tg.InputP
 	b.sendText(ctx, peer, fmt.Sprintf("✅ Job %s created. Starting download…", job.ID))
 
 	go func() {
-		b.runJob(jobCtx, job, peer, asDoc)
+		b.runJob(jobCtx, job, peer, asDoc, asZip)
 	}()
 }
 
 // runJob executes a full download → upload cycle for a job.
-func (b *Bot) runJob(ctx context.Context, job *store.Job, peer tg.InputPeerClass, asDoc bool) {
+func (b *Bot) runJob(ctx context.Context, job *store.Job, peer tg.InputPeerClass, asDoc, asZip bool) {
 	jobDir := filepath.Join(b.cfg.TempDir, job.ID)
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
 		b.manager.SetFailed(job.ID, err)
@@ -231,9 +240,6 @@ func (b *Bot) runJob(ctx context.Context, job *store.Job, peer tg.InputPeerClass
 		return
 	}
 
-	filename := filepath.Base(localPath)
-	b.manager.SetUploading(job.ID, filename)
-
 	info, err := os.Stat(localPath)
 	if err != nil {
 		b.manager.SetFailed(job.ID, err)
@@ -241,9 +247,17 @@ func (b *Bot) runJob(ctx context.Context, job *store.Job, peer tg.InputPeerClass
 		return
 	}
 
-	uploader := newUploader(b.api, b.cfg, b.manager, job.ID)
+	updr := newUploader(b.api, b.cfg, b.manager, job.ID)
 
-	if err := uploader.Upload(ctx, localPath, filename, info.Size(), peer, asDoc, progressFn); err != nil {
+	if info.IsDir() {
+		b.runJobDir(ctx, job, peer, localPath, asDoc, asZip, updr, progressFn)
+		return
+	}
+
+	filename := filepath.Base(localPath)
+	b.manager.SetUploading(job.ID, filename)
+
+	if err := updr.Upload(ctx, localPath, filename, info.Size(), peer, asDoc, progressFn); err != nil {
 		if ctx.Err() != nil {
 			b.manager.SetCancelled(job.ID)
 			b.sendText(ctx, peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
@@ -256,6 +270,122 @@ func (b *Bot) runJob(ctx context.Context, job *store.Job, peer tg.InputPeerClass
 
 	b.manager.SetDone(job.ID, info.Size())
 	b.sendText(ctx, peer, fmt.Sprintf("✅ Job %s done! Uploaded: %s", job.ID, filename))
+}
+
+// runJobDir handles uploading for a multi-file torrent (directory result).
+// If asZip is true, all files are zipped into a single archive before upload.
+// Otherwise, each file is uploaded individually with cumulative progress tracking.
+func (b *Bot) runJobDir(ctx context.Context, job *store.Job, peer tg.InputPeerClass, dirPath string, asDoc, asZip bool, updr *uploader, progressFn jobs.ProgressFunc) {
+	dirName := filepath.Base(dirPath)
+
+	if asZip {
+		zipPath := dirPath + ".zip"
+		b.sendText(ctx, peer, fmt.Sprintf("📦 Job %s: creating zip archive…", job.ID))
+		if err := zipDir(dirPath, zipPath); err != nil {
+			b.manager.SetFailed(job.ID, err)
+			b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed to create zip: %v", job.ID, err))
+			return
+		}
+
+		zipInfo, err := os.Stat(zipPath)
+		if err != nil {
+			b.manager.SetFailed(job.ID, err)
+			b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
+			return
+		}
+
+		filename := dirName + ".zip"
+		b.manager.SetUploading(job.ID, filename)
+
+		if err := updr.Upload(ctx, zipPath, filename, zipInfo.Size(), peer, asDoc, progressFn); err != nil {
+			if ctx.Err() != nil {
+				b.manager.SetCancelled(job.ID)
+				b.sendText(ctx, peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
+			} else {
+				b.manager.SetFailed(job.ID, err)
+				b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s upload failed: %v", job.ID, err))
+			}
+			return
+		}
+
+		b.manager.SetDone(job.ID, zipInfo.Size())
+		b.sendText(ctx, peer, fmt.Sprintf("✅ Job %s done! Uploaded: %s", job.ID, filename))
+		return
+	}
+
+	// Upload each file individually with cumulative progress.
+	var allFiles []string
+	var totalSize int64
+	if err := filepath.Walk(dirPath, func(path string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if fi.IsDir() {
+			return nil
+		}
+		allFiles = append(allFiles, path)
+		totalSize += fi.Size()
+		return nil
+	}); err != nil {
+		b.manager.SetFailed(job.ID, err)
+		b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
+		return
+	}
+
+	if len(allFiles) == 0 {
+		b.manager.SetFailed(job.ID, fmt.Errorf("no files in torrent directory"))
+		b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s: no files found.", job.ID))
+		return
+	}
+
+	b.manager.SetUploading(job.ID, dirName)
+	b.sendText(ctx, peer, fmt.Sprintf("📤 Job %s: uploading %d file(s)…", job.ID, len(allFiles)))
+
+	var uploadedBytes int64
+	for _, filePath := range allFiles {
+		if ctx.Err() != nil {
+			b.manager.SetCancelled(job.ID)
+			b.sendText(ctx, peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
+			return
+		}
+
+		fi, err := os.Stat(filePath)
+		if err != nil {
+			b.manager.SetFailed(job.ID, err)
+			b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
+			return
+		}
+
+		rel, err := filepath.Rel(dirPath, filePath)
+		if err != nil {
+			b.manager.SetFailed(job.ID, err)
+			b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
+			return
+		}
+		rel = filepath.ToSlash(rel)
+
+		// Wrap progress to show cumulative bytes across all files.
+		offset := uploadedBytes
+		fileSize := fi.Size()
+		wrapped := func(done, _, speed int64) {
+			progressFn(offset+done, totalSize, speed)
+		}
+
+		if err := updr.Upload(ctx, filePath, rel, fileSize, peer, asDoc, wrapped); err != nil {
+			if ctx.Err() != nil {
+				b.manager.SetCancelled(job.ID)
+				b.sendText(ctx, peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
+			} else {
+				b.manager.SetFailed(job.ID, err)
+				b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s upload failed: %v", job.ID, err))
+			}
+			return
+		}
+		uploadedBytes += fileSize
+	}
+
+	b.manager.SetDone(job.ID, totalSize)
+	b.sendText(ctx, peer, fmt.Sprintf("✅ Job %s done! Uploaded %d file(s) from: %s", job.ID, len(allFiles), dirName))
 }
 
 // cmdStatus handles /status.
