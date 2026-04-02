@@ -31,7 +31,8 @@ All configuration is done via environment variables:
 | `BOT_TOKEN` | ✅ | — | Telegram bot token from @BotFather |
 | `ADMIN_ID` | ❌ | `0` | Telegram user ID of the bot admin (can use all commands) |
 | `ALLOWED_IDS` | ❌ | *(open)* | Comma-separated list of allowed user IDs. If empty and `ADMIN_ID` is `0`, the bot accepts all users |
-| `PORT` | ❌ | `8080` | Port for the web dashboard |
+| `WEB_ENABLED` | ❌ | `false` | Set to `true` to enable the web dashboard HTTP server |
+| `PORT` | ❌ | `8080` | Port for the web dashboard (only used when `WEB_ENABLED=true`) |
 | `TEMP_DIR` | ❌ | `/tmp/goleecher` | Directory for temporary download files |
 
 ## Running
