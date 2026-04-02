@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>goleecher dashboard</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: system-ui, sans-serif; background: #0f0f0f; color: #e0e0e0; padding: 2rem; }
+        h1 { color: #00bcd4; margin-bottom: 1.5rem; }
+        .stats { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 2rem; }
+        .stat-card { background: #1e1e1e; border-radius: 8px; padding: 1rem 1.5rem; min-width: 150px; }
+        .stat-card .label { font-size: 0.75rem; color: #888; text-transform: uppercase; }
+        .stat-card .value { font-size: 1.5rem; font-weight: bold; color: #fff; margin-top: 0.25rem; }
+        table { width: 100%; border-collapse: collapse; background: #1e1e1e; border-radius: 8px; overflow: hidden; }
+        th { background: #2a2a2a; padding: 0.75rem 1rem; text-align: left; font-size: 0.75rem; text-transform: uppercase; color: #888; }
+        td { padding: 0.75rem 1rem; border-top: 1px solid #2a2a2a; font-size: 0.875rem; }
+        .badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 999px; font-size: 0.7rem; font-weight: bold; }
+        .badge.downloading { background: #1565c0; }
+        .badge.uploading   { background: #6a1b9a; }
+        .badge.done        { background: #2e7d32; }
+        .badge.failed      { background: #b71c1c; }
+        .badge.cancelled   { background: #424242; }
+        .badge.pending     { background: #e65100; }
+        .progress-bar { background: #333; border-radius: 4px; height: 6px; width: 100%; }
+        .progress-fill { background: #00bcd4; border-radius: 4px; height: 100%; transition: width 0.5s; }
+        .no-jobs { text-align: center; color: #555; padding: 3rem; }
+    </style>
+</head>
+<body>
+    <h1>⚡ goleecher</h1>
+    <div class="stats" id="stats"></div>
+    <table>
+        <thead>
+            <tr>
+                <th>Job ID</th>
+                <th>File</th>
+                <th>Status</th>
+                <th>Progress</th>
+                <th>Speed</th>
+            </tr>
+        </thead>
+        <tbody id="jobs-tbody"></tbody>
+    </table>
+    <script>
+        function escapeHtml(s) {
+            return String(s)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function humanBytes(b) {
+            if (!b) return '0 B';
+            const units = ['B','KB','MB','GB','TB'];
+            let i = 0;
+            while (b >= 1024 && i < units.length - 1) { b /= 1024; i++; }
+            return b.toFixed(1) + ' ' + units[i];
+        }
+
+        async function refresh() {
+            const [statsRes, jobsRes] = await Promise.all([
+                fetch('/api/stats').then(r => r.json()).catch(() => null),
+                fetch('/api/jobs').then(r => r.json()).catch(() => [])
+            ]);
+
+            if (statsRes) {
+                document.getElementById('stats').innerHTML = `
+                    <div class="stat-card"><div class="label">Active Jobs</div><div class="value">${statsRes.active_jobs}</div></div>
+                    <div class="stat-card"><div class="label">Total Jobs</div><div class="value">${statsRes.total_jobs}</div></div>
+                    <div class="stat-card"><div class="label">Total Data</div><div class="value">${humanBytes(statsRes.total_bytes)}</div></div>
+                    <div class="stat-card"><div class="label">Uptime</div><div class="value">${statsRes.uptime}</div></div>
+                `;
+            }
+
+            const tbody = document.getElementById('jobs-tbody');
+            if (!jobsRes || jobsRes.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" class="no-jobs">No jobs yet</td></tr>';
+                return;
+            }
+
+            jobsRes.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            tbody.innerHTML = jobsRes.map(j => {
+                const id       = escapeHtml(j.id);
+                const filename = escapeHtml(j.filename || j.url.slice(0, 40));
+                const urlAttr  = escapeHtml(j.url);
+                const status   = escapeHtml(j.status);
+                const progress = j.progress.toFixed(1);
+                return `<tr>
+                    <td><code>${id}</code></td>
+                    <td title="${urlAttr}">${filename}</td>
+                    <td><span class="badge ${status}">${status}</span></td>
+                    <td style="min-width:120px">
+                        <div style="display:flex;align-items:center;gap:8px">
+                            <div class="progress-bar"><div class="progress-fill" style="width:${progress}%"></div></div>
+                            <span style="white-space:nowrap">${progress}%</span>
+                        </div>
+                    </td>
+                    <td>${humanBytes(j.speed)}/s</td>
+                </tr>`;
+            }).join('');
+        }
+
+        refresh();
+        setInterval(refresh, 2000);
+    </script>
+</body>
+</html>
