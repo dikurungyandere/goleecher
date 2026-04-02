@@ -178,7 +178,7 @@ func (b *Bot) cmdStart(ctx context.Context, fromID, chatID int64, peer tg.InputP
 		b.sendText(ctx, peer, "⛔ You are not authorized to use this bot.")
 		return
 	}
-	b.sendText(ctx, peer, "⚡ *goleecher* ready!\n\nCommands:\n/leech <url|magnet> [document] — download & upload\n/status — show active jobs\n/cancel <id> — cancel a job")
+	b.sendText(ctx, peer, "⚡ goleecher ready!\n\nCommands:\n/leech <url|magnet> [document] — download & upload\n/status — show active jobs\n/cancel <id> — cancel a job")
 }
 
 // cmdLeech handles /leech.
@@ -191,7 +191,7 @@ func (b *Bot) cmdLeech(ctx context.Context, fromID, chatID int64, peer tg.InputP
 	job, jobCtx, cancel := b.manager.NewJob(ctx, fromID, chatID, url)
 	_ = cancel
 
-	b.sendText(ctx, peer, fmt.Sprintf("✅ Job `%s` created. Starting download…", job.ID))
+	b.sendText(ctx, peer, fmt.Sprintf("✅ Job %s created. Starting download…", job.ID))
 
 	go func() {
 		b.runJob(jobCtx, job, peer, asDoc)
@@ -203,7 +203,7 @@ func (b *Bot) runJob(ctx context.Context, job *store.Job, peer tg.InputPeerClass
 	jobDir := filepath.Join(b.cfg.TempDir, job.ID)
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
 		b.manager.SetFailed(job.ID, err)
-		b.sendText(ctx, peer, fmt.Sprintf("❌ Job `%s` failed: %v", job.ID, err))
+		b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
 		return
 	}
 	defer os.RemoveAll(jobDir)
@@ -223,10 +223,10 @@ func (b *Bot) runJob(ctx context.Context, job *store.Job, peer tg.InputPeerClass
 	if err != nil {
 		if ctx.Err() != nil {
 			b.manager.SetCancelled(job.ID)
-			b.sendText(ctx, peer, fmt.Sprintf("🚫 Job `%s` cancelled.", job.ID))
+			b.sendText(ctx, peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
 		} else {
 			b.manager.SetFailed(job.ID, err)
-			b.sendText(ctx, peer, fmt.Sprintf("❌ Job `%s` failed: %v", job.ID, err))
+			b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
 		}
 		return
 	}
@@ -237,7 +237,7 @@ func (b *Bot) runJob(ctx context.Context, job *store.Job, peer tg.InputPeerClass
 	info, err := os.Stat(localPath)
 	if err != nil {
 		b.manager.SetFailed(job.ID, err)
-		b.sendText(ctx, peer, fmt.Sprintf("❌ Job `%s` failed: %v", job.ID, err))
+		b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
 		return
 	}
 
@@ -246,16 +246,16 @@ func (b *Bot) runJob(ctx context.Context, job *store.Job, peer tg.InputPeerClass
 	if err := uploader.Upload(ctx, localPath, filename, info.Size(), peer, asDoc, progressFn); err != nil {
 		if ctx.Err() != nil {
 			b.manager.SetCancelled(job.ID)
-			b.sendText(ctx, peer, fmt.Sprintf("🚫 Job `%s` cancelled.", job.ID))
+			b.sendText(ctx, peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
 		} else {
 			b.manager.SetFailed(job.ID, err)
-			b.sendText(ctx, peer, fmt.Sprintf("❌ Job `%s` upload failed: %v", job.ID, err))
+			b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s upload failed: %v", job.ID, err))
 		}
 		return
 	}
 
 	b.manager.SetDone(job.ID, info.Size())
-	b.sendText(ctx, peer, fmt.Sprintf("✅ Job `%s` done! Uploaded: %s", job.ID, filename))
+	b.sendText(ctx, peer, fmt.Sprintf("✅ Job %s done! Uploaded: %s", job.ID, filename))
 }
 
 // cmdStatus handles /status.
@@ -275,7 +275,7 @@ func (b *Bot) cmdStatus(ctx context.Context, fromID int64, peer tg.InputPeerClas
 	sb.WriteString("📋 Active jobs:\n\n")
 	for _, j := range active {
 		sb.WriteString(fmt.Sprintf(
-			"• `%s` [%s] %.1f%% — %s\n",
+			"• %s [%s] %.1f%% — %s\n",
 			j.ID, j.Status, j.Progress, j.Filename,
 		))
 	}
@@ -292,7 +292,7 @@ func (b *Bot) cmdCancel(ctx context.Context, fromID int64, peer tg.InputPeerClas
 		b.sendText(ctx, peer, fmt.Sprintf("❌ %v", err))
 		return
 	}
-	b.sendText(ctx, peer, fmt.Sprintf("🚫 Job `%s` cancel requested.", jobID))
+	b.sendText(ctx, peer, fmt.Sprintf("🚫 Job %s cancel requested.", jobID))
 }
 
 // cmdCancelAll handles /cancelall (admin only).
@@ -322,11 +322,11 @@ func (b *Bot) sendText(ctx context.Context, peer tg.InputPeerClass, text string)
 }
 
 func cryptoRandInt63() int64 {
-var b [8]byte
-_, _ = rand.Read(b[:])
-v := int64(binary.LittleEndian.Uint64(b[:]))
-if v < 0 {
-v = -v
-}
-return v
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	v := int64(binary.LittleEndian.Uint64(b[:]))
+	if v < 0 {
+		v = -v
+	}
+	return v
 }

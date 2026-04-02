@@ -52,9 +52,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if _, err := w.Write(data); err != nil {
-		http.Error(w, "write error", http.StatusInternalServerError)
-	}
+	w.Write(data) //nolint:errcheck // best-effort write to HTTP response
 }
 
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
