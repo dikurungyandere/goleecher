@@ -18,7 +18,7 @@ A high-performance Telegram bot that downloads files from HTTP URLs or magnet li
 
 ## Requirements
 
-- Go 1.21+ (module requires `go 1.25` in go.mod, adjust if needed)
+- Go 1.25+ (matches `go.mod`)
 - A Telegram **API ID** and **API Hash** — get them from [my.telegram.org](https://my.telegram.org)
 - A Telegram **Bot Token** — create a bot via [@BotFather](https://t.me/BotFather)
 
@@ -89,6 +89,7 @@ docker run -e API_ID=... -e API_HASH=... -e BOT_TOKEN=... -p 8080:8080 goleecher
 | `/leech <url\|magnet> document` | Same as above but forces upload as a document file |
 | `/leech <url\|magnet> zip` | For multi-file torrents, zip all files into one archive before upload |
 | `/leech <url\|magnet> document zip` | Combine both flags: force document upload and zip multi-file torrent output |
+| `/leech [document] [zip]` *(as a reply)* | Reply to a Telegram message containing a `.torrent` file to download and upload it |
 | `/status` | List all currently active jobs with their progress |
 | `/cancel <job_id>` | Cancel a specific job by ID |
 | `/cancelall` | Cancel all active jobs (admin only) |
@@ -99,6 +100,7 @@ docker run -e API_ID=... -e API_HASH=... -e BOT_TOKEN=... -p 8080:8080 goleecher
 /leech magnet:?xt=urn:btih:... document
 /leech magnet:?xt=urn:btih:... zip
 /leech magnet:?xt=urn:btih:... document zip
+/leech document     # when replying to a .torrent file message
 /cancel a1b2c3d4
 ```
 

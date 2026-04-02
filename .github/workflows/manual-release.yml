@@ -1,0 +1,149 @@
+name: Manual Build and Release Binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (for example: v1.2.3)"
+        required: true
+        type: string
+      release_name:
+        description: "Optional release name (defaults to tag)"
+        required: false
+        type: string
+      prerelease:
+        description: "Mark release as prerelease"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}${{ matrix.goarm && format('/{0}', matrix.goarm) || '' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: linux
+            goarch: arm
+            goarm: "7"
+          - goos: linux
+            goarch: "386"
+          - goos: linux
+            goarch: riscv64
+          - goos: linux
+            goarch: ppc64le
+          - goos: linux
+            goarch: s390x
+          # Windows
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+          - goos: windows
+            goarch: "386"
+          # macOS
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          # FreeBSD
+          - goos: freebsd
+            goarch: amd64
+          - goos: freebsd
+            goarch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          CGO_ENABLED: 0
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          suffix=""
+          if [ "${GOOS}" = "windows" ]; then
+            suffix=".exe"
+          fi
+
+          arch="${GOARCH}"
+          if [ -n "${GOARM:-}" ]; then
+            arch="${GOARCH}v${GOARM}"
+          fi
+
+          name="goleecher-${GOOS}-${arch}"
+          bin="${name}${suffix}"
+
+          go build -trimpath -ldflags="-s -w" -o "dist/${bin}" .
+
+          if [ "${GOOS}" = "windows" ]; then
+            (cd dist && zip -q "${name}.zip" "${bin}")
+          else
+            tar -C dist -czf "dist/${name}.tar.gz" "${bin}"
+          fi
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goarm && format('-v{0}', matrix.goarm) || '' }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4.1.3
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Resolve release metadata
+        id: meta
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          INPUT_RELEASE_NAME: ${{ github.event.inputs.release_name }}
+        run: |
+          set -euo pipefail
+          echo "tag=${INPUT_TAG}" >> "$GITHUB_OUTPUT"
+          if [ -n "${INPUT_RELEASE_NAME}" ]; then
+            echo "name=${INPUT_RELEASE_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${INPUT_TAG}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
+          prerelease: ${{ github.event.inputs.prerelease == 'true' }}
+          generate_release_notes: true
+          files: |
+            dist/*.zip
+            dist/*.tar.gz
