@@ -104,22 +104,6 @@ docker run -e API_ID=... -e API_HASH=... -e BOT_TOKEN=... -p 8080:8080 goleecher
 /cancel a1b2c3d4
 ```
 
-## Releases
-
-This repository includes a manual GitHub Actions workflow to build and publish release binaries for multiple operating systems and architectures.
-
-1. Open **Actions** → **Manual Build and Release Binaries**.
-2. Click **Run workflow**.
-3. Provide a release tag (for example `v1.2.3`) and optional release name.
-4. The workflow cross-builds binaries and attaches them to the GitHub Releases page.
-
-Produced artifacts are packaged as `.tar.gz` (Linux/macOS/FreeBSD) and `.zip` (Windows), and include broad architecture coverage:
-
-- Linux: `amd64`, `arm64`, `arm/v7`, `386`, `riscv64`, `ppc64le`, `s390x`
-- Windows: `amd64`, `arm64`, `386`
-- macOS: `amd64`, `arm64`
-- FreeBSD: `amd64`, `arm64`
-
 ## Web Dashboard
 
 The bot starts an HTTP server (default port `8080`) with:
