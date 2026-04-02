@@ -7,6 +7,8 @@ A high-performance Telegram bot that downloads files from HTTP URLs or magnet li
 - **HTTP download** — download any direct-link file via [gdl](https://github.com/forest6511/gdl) (multi-connection accelerated downloader)
 - **Torrent / magnet download** — download via magnet URI using a full BitTorrent client
 - **Auto-upload to Telegram** — files are uploaded to the chat where the command was sent
+- **Multi-file torrent upload** — torrents containing multiple files are uploaded file-by-file with cumulative progress
+- **Optional ZIP archive mode** — add `zip` flag to package multi-file torrent output into one `.zip` before upload
 - **Large-file splitting** — files larger than 1.95 GiB are automatically split into parts before upload
 - **Parallel upload** — file parts are uploaded to Telegram in parallel (4 workers) for speed
 - **Job management** — track active jobs, cancel individual jobs, or cancel all at once
@@ -85,6 +87,8 @@ docker run -e API_ID=... -e API_HASH=... -e BOT_TOKEN=... -p 8080:8080 goleecher
 | `/start` | Show the welcome message and command list |
 | `/leech <url\|magnet>` | Download a file from a URL or magnet link and upload it to Telegram as media |
 | `/leech <url\|magnet> document` | Same as above but forces upload as a document file |
+| `/leech <url\|magnet> zip` | For multi-file torrents, zip all files into one archive before upload |
+| `/leech <url\|magnet> document zip` | Combine both flags: force document upload and zip multi-file torrent output |
 | `/status` | List all currently active jobs with their progress |
 | `/cancel <job_id>` | Cancel a specific job by ID |
 | `/cancelall` | Cancel all active jobs (admin only) |
@@ -93,6 +97,8 @@ docker run -e API_ID=... -e API_HASH=... -e BOT_TOKEN=... -p 8080:8080 goleecher
 ```
 /leech https://example.com/file.zip
 /leech magnet:?xt=urn:btih:... document
+/leech magnet:?xt=urn:btih:... zip
+/leech magnet:?xt=urn:btih:... document zip
 /cancel a1b2c3d4
 ```
 
@@ -115,6 +121,7 @@ The bot starts an HTTP server (default port `8080`) with:
     ├── jobs/manager.go            # Job lifecycle management (create, status updates, cancel)
     ├── bot/
     │   ├── bot.go                 # Telegram client setup and Run loop
+    │   ├── archiver.go            # ZIP creation helper for multi-file torrent output
     │   ├── handlers.go            # Update handler, command dispatch, command implementations
     │   └── uploader.go            # Parallel file uploader with large-file splitting support
     ├── downloader/
@@ -136,6 +143,8 @@ The bot starts an HTTP server (default port `8080`) with:
 
 - The session file (`session.json`) is stored in `TEMP_DIR` and persists the bot's MTProto session across restarts.
 - Temporary download directories are created per-job under `TEMP_DIR/<job_id>/` and removed after the upload completes or fails.
+- For multi-file torrents, default behavior uploads each file individually while preserving relative paths in filenames.
+- Add `zip` to `/leech` to upload multi-file torrent results as a single archive (`<torrent_name>.zip`).
 - Files larger than 1.95 GiB are split into `.part001`, `.part002`, … parts automatically before upload, since Telegram's maximum file size is 2 GiB.
 
 ## License
