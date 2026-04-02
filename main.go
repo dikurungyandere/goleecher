@@ -31,14 +31,16 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Start web server in background
-	webSrv := web.NewServer(cfg, st)
-	go func() {
-		log.Printf("Web dashboard listening on :%s", cfg.Port)
-		if err := webSrv.Start(); err != nil {
-			log.Printf("Web server error: %v", err)
-		}
-	}()
+	// Start web server in background (only when WEB_ENABLED=true)
+	if cfg.WebEnabled {
+		webSrv := web.NewServer(cfg, st)
+		go func() {
+			log.Printf("Web dashboard listening on :%s", cfg.Port)
+			if err := webSrv.Start(); err != nil {
+				log.Printf("Web server error: %v", err)
+			}
+		}()
+	}
 
 	// Start bot (blocking)
 	b := bot.New(cfg, st)

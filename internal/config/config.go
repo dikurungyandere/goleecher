@@ -12,6 +12,7 @@ type Config struct {
 	BotToken   string
 	AdminID    int64
 	AllowedIDs []int64
+	WebEnabled bool
 	Port       string
 	TempDir    string
 }
@@ -46,6 +47,7 @@ func Load() *Config {
 		BotToken:   os.Getenv("BOT_TOKEN"),
 		AdminID:    adminID,
 		AllowedIDs: allowedIDs,
+		WebEnabled: strings.ToLower(strings.TrimSpace(os.Getenv("WEB_ENABLED"))) == "true",
 		Port:       port,
 		TempDir:    tempDir,
 	}
