@@ -188,7 +188,10 @@ func (u *uploader) uploadFile(ctx context.Context, filePath, filename string, si
 		case <-abort:
 			close(workCh)
 			wg.Wait()
-			return nil, uploadErr.Load().(error)
+			if v := uploadErr.Load(); v != nil {
+				return nil, v.(error)
+			}
+			return nil, fmt.Errorf("upload aborted")
 		}
 	}
 
