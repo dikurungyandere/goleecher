@@ -20,7 +20,8 @@ type Bot struct {
 	cfg     *config.Config
 	st      *store.Store
 	manager *jobs.Manager
-	api     *tg.Client // set in Run before updates are dispatched
+	api     *tg.Client      // set in Run before updates are dispatched
+	rootCtx context.Context // bot lifetime context, set in Run
 }
 
 // New creates a new Bot instance.
@@ -45,6 +46,7 @@ func (b *Bot) Run(ctx context.Context) error {
 
 	// client.API() is safe to call before Run; the tg.Client wraps the invoker.
 	b.api = client.API()
+	b.rootCtx = ctx
 
 	return client.Run(ctx, func(ctx context.Context) error {
 		_, err := client.Auth().Bot(ctx, b.cfg.BotToken)

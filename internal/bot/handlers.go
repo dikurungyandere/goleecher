@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gotd/td/tg"
 
@@ -212,7 +213,7 @@ func (b *Bot) cmdStart(ctx context.Context, fromID, chatID int64, peer tg.InputP
 		b.sendText(ctx, peer, "⛔ You are not authorized to use this bot.")
 		return
 	}
-	b.sendText(ctx, peer, "⚡ goleecher ready!\n\nCommands:\n/leech <url|magnet> [flags] — download & upload\n  flags: document — force document upload\n         zip      — zip multi-file torrent into one archive\n/leech [flags]    — reply to a .torrent file to leech it\n/status — show active jobs\n/cancel <id> — cancel a job")
+	b.sendText(ctx, peer, "⚡ goleecher ready!\n\nCommands:\n/leech <url|magnet> — download & upload\n/leech <url|magnet> document — force document upload\n/leech <url|magnet> zip — zip torrent before upload\n/leech — reply to a .torrent file to leech it\n/status — show active jobs\n/cancel <id> — cancel a job")
 }
 
 // cmdLeech handles /leech.
@@ -222,7 +223,7 @@ func (b *Bot) cmdLeech(ctx context.Context, fromID, chatID int64, peer tg.InputP
 		return
 	}
 
-	job, jobCtx, cancel := b.manager.NewJob(ctx, fromID, chatID, url)
+	job, jobCtx, cancel := b.manager.NewJob(b.rootCtx, fromID, chatID, url)
 	_ = cancel
 
 	b.sendText(ctx, peer, fmt.Sprintf("✅ Job %s created. Starting download…", job.ID))
@@ -268,7 +269,7 @@ func (b *Bot) cmdLeechTorrentReply(ctx context.Context, fromID, chatID int64, pe
 		return
 	}
 
-	job, jobCtx, cancel := b.manager.NewJob(ctx, fromID, chatID, torrentDocumentFilename(doc))
+	job, jobCtx, cancel := b.manager.NewJob(b.rootCtx, fromID, chatID, torrentDocumentFilename(doc))
 	_ = cancel
 
 	b.sendText(ctx, peer, fmt.Sprintf("✅ Job %s created. Starting download…", job.ID))
@@ -283,7 +284,7 @@ func (b *Bot) runJob(ctx context.Context, job *store.Job, peer tg.InputPeerClass
 	jobDir := filepath.Join(b.cfg.TempDir, job.ID)
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
 		b.manager.SetFailed(job.ID, err)
-		b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
+		b.sendNotify(peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
 		return
 	}
 	defer os.RemoveAll(jobDir)
@@ -297,16 +298,17 @@ func (b *Bot) runJob(ctx context.Context, job *store.Job, peer tg.InputPeerClass
 	if strings.HasPrefix(strings.ToLower(job.URL), "magnet:") {
 		localPath, err = downloader.DownloadTorrent(ctx, job.URL, jobDir, progressFn)
 	} else {
-		localPath, err = downloader.DownloadHTTP(ctx, job.URL, jobDir, progressFn)
+		nameCallback := func(name string) { b.manager.SetFilename(job.ID, name) }
+		localPath, err = downloader.DownloadHTTP(ctx, job.URL, jobDir, progressFn, nameCallback)
 	}
 
 	if err != nil {
 		if ctx.Err() != nil {
 			b.manager.SetCancelled(job.ID)
-			b.sendText(ctx, peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
+			b.sendNotify(peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
 		} else {
 			b.manager.SetFailed(job.ID, err)
-			b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
+			b.sendNotify(peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
 		}
 		return
 	}
@@ -320,7 +322,7 @@ func (b *Bot) runJobFromTorrentDocument(ctx context.Context, job *store.Job, pee
 	jobDir := filepath.Join(b.cfg.TempDir, job.ID)
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
 		b.manager.SetFailed(job.ID, err)
-		b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
+		b.sendNotify(peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
 		return
 	}
 	defer os.RemoveAll(jobDir)
@@ -333,10 +335,10 @@ func (b *Bot) runJobFromTorrentDocument(ctx context.Context, job *store.Job, pee
 	if err := b.downloadTelegramDocument(ctx, doc, torrentFilePath); err != nil {
 		if ctx.Err() != nil {
 			b.manager.SetCancelled(job.ID)
-			b.sendText(ctx, peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
+			b.sendNotify(peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
 		} else {
 			b.manager.SetFailed(job.ID, err)
-			b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed to fetch .torrent: %v", job.ID, err))
+			b.sendNotify(peer, fmt.Sprintf("❌ Job %s failed to fetch .torrent: %v", job.ID, err))
 		}
 		return
 	}
@@ -345,10 +347,10 @@ func (b *Bot) runJobFromTorrentDocument(ctx context.Context, job *store.Job, pee
 	if err != nil {
 		if ctx.Err() != nil {
 			b.manager.SetCancelled(job.ID)
-			b.sendText(ctx, peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
+			b.sendNotify(peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
 		} else {
 			b.manager.SetFailed(job.ID, err)
-			b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
+			b.sendNotify(peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
 		}
 		return
 	}
@@ -362,7 +364,7 @@ func (b *Bot) runJobAfterDownload(ctx context.Context, job *store.Job, peer tg.I
 	info, err := os.Stat(localPath)
 	if err != nil {
 		b.manager.SetFailed(job.ID, err)
-		b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
+		b.sendNotify(peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
 		return
 	}
 
@@ -377,16 +379,16 @@ func (b *Bot) runJobAfterDownload(ctx context.Context, job *store.Job, peer tg.I
 	if err := updr.Upload(ctx, localPath, filename, info.Size(), peer, asDoc, progressFn); err != nil {
 		if ctx.Err() != nil {
 			b.manager.SetCancelled(job.ID)
-			b.sendText(ctx, peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
+			b.sendNotify(peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
 		} else {
 			b.manager.SetFailed(job.ID, err)
-			b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s upload failed: %v", job.ID, err))
+			b.sendNotify(peer, fmt.Sprintf("❌ Job %s upload failed: %v", job.ID, err))
 		}
 		return
 	}
 
 	b.manager.SetDone(job.ID, info.Size())
-	b.sendText(ctx, peer, fmt.Sprintf("✅ Job %s done! Uploaded: %s", job.ID, filename))
+	b.sendNotify(peer, fmt.Sprintf("✅ Job %s done! Uploaded: %s", job.ID, filename))
 }
 
 // runJobDir handles uploading for a multi-file torrent (directory result).
@@ -397,17 +399,17 @@ func (b *Bot) runJobDir(ctx context.Context, job *store.Job, peer tg.InputPeerCl
 
 	if asZip {
 		zipPath := dirPath + ".zip"
-		b.sendText(ctx, peer, fmt.Sprintf("📦 Job %s: creating zip archive…", job.ID))
+		b.sendNotify(peer, fmt.Sprintf("📦 Job %s: creating zip archive…", job.ID))
 		if err := zipDir(dirPath, zipPath); err != nil {
 			b.manager.SetFailed(job.ID, err)
-			b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed to create zip: %v", job.ID, err))
+			b.sendNotify(peer, fmt.Sprintf("❌ Job %s failed to create zip: %v", job.ID, err))
 			return
 		}
 
 		zipInfo, err := os.Stat(zipPath)
 		if err != nil {
 			b.manager.SetFailed(job.ID, err)
-			b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
+			b.sendNotify(peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
 			return
 		}
 
@@ -417,16 +419,16 @@ func (b *Bot) runJobDir(ctx context.Context, job *store.Job, peer tg.InputPeerCl
 		if err := updr.Upload(ctx, zipPath, filename, zipInfo.Size(), peer, asDoc, progressFn); err != nil {
 			if ctx.Err() != nil {
 				b.manager.SetCancelled(job.ID)
-				b.sendText(ctx, peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
+				b.sendNotify(peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
 			} else {
 				b.manager.SetFailed(job.ID, err)
-				b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s upload failed: %v", job.ID, err))
+				b.sendNotify(peer, fmt.Sprintf("❌ Job %s upload failed: %v", job.ID, err))
 			}
 			return
 		}
 
 		b.manager.SetDone(job.ID, zipInfo.Size())
-		b.sendText(ctx, peer, fmt.Sprintf("✅ Job %s done! Uploaded: %s", job.ID, filename))
+		b.sendNotify(peer, fmt.Sprintf("✅ Job %s done! Uploaded: %s", job.ID, filename))
 		return
 	}
 
@@ -445,38 +447,38 @@ func (b *Bot) runJobDir(ctx context.Context, job *store.Job, peer tg.InputPeerCl
 		return nil
 	}); err != nil {
 		b.manager.SetFailed(job.ID, err)
-		b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
+		b.sendNotify(peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
 		return
 	}
 
 	if len(allFiles) == 0 {
 		b.manager.SetFailed(job.ID, fmt.Errorf("no files in torrent directory"))
-		b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s: no files found.", job.ID))
+		b.sendNotify(peer, fmt.Sprintf("❌ Job %s: no files found.", job.ID))
 		return
 	}
 
 	b.manager.SetUploading(job.ID, dirName)
-	b.sendText(ctx, peer, fmt.Sprintf("📤 Job %s: uploading %d file(s)…", job.ID, len(allFiles)))
+	b.sendNotify(peer, fmt.Sprintf("📤 Job %s: uploading %d file(s)…", job.ID, len(allFiles)))
 
 	var uploadedBytes int64
 	for _, filePath := range allFiles {
 		if ctx.Err() != nil {
 			b.manager.SetCancelled(job.ID)
-			b.sendText(ctx, peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
+			b.sendNotify(peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
 			return
 		}
 
 		fi, err := os.Stat(filePath)
 		if err != nil {
 			b.manager.SetFailed(job.ID, err)
-			b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
+			b.sendNotify(peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
 			return
 		}
 
 		rel, err := filepath.Rel(dirPath, filePath)
 		if err != nil {
 			b.manager.SetFailed(job.ID, err)
-			b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
+			b.sendNotify(peer, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
 			return
 		}
 		rel = filepath.ToSlash(rel)
@@ -491,10 +493,10 @@ func (b *Bot) runJobDir(ctx context.Context, job *store.Job, peer tg.InputPeerCl
 		if err := updr.Upload(ctx, filePath, rel, fileSize, peer, asDoc, wrapped); err != nil {
 			if ctx.Err() != nil {
 				b.manager.SetCancelled(job.ID)
-				b.sendText(ctx, peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
+				b.sendNotify(peer, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
 			} else {
 				b.manager.SetFailed(job.ID, err)
-				b.sendText(ctx, peer, fmt.Sprintf("❌ Job %s upload failed: %v", job.ID, err))
+				b.sendNotify(peer, fmt.Sprintf("❌ Job %s upload failed: %v", job.ID, err))
 			}
 			return
 		}
@@ -502,7 +504,7 @@ func (b *Bot) runJobDir(ctx context.Context, job *store.Job, peer tg.InputPeerCl
 	}
 
 	b.manager.SetDone(job.ID, totalSize)
-	b.sendText(ctx, peer, fmt.Sprintf("✅ Job %s done! Uploaded %d file(s) from: %s", job.ID, len(allFiles), dirName))
+	b.sendNotify(peer, fmt.Sprintf("✅ Job %s done! Uploaded %d file(s) from: %s", job.ID, len(allFiles), dirName))
 }
 
 // cmdStatus handles /status.
@@ -521,9 +523,13 @@ func (b *Bot) cmdStatus(ctx context.Context, fromID int64, peer tg.InputPeerClas
 	var sb strings.Builder
 	sb.WriteString("📋 Active jobs:\n\n")
 	for _, j := range active {
+		speed := ""
+		if j.Speed > 0 {
+			speed = " @ " + fmtSpeed(j.Speed)
+		}
 		sb.WriteString(fmt.Sprintf(
-			"• %s [%s] %.1f%% — %s\n",
-			j.ID, j.Status, j.Progress, j.Filename,
+			"• %s [%s] %.1f%%%s — %s\n",
+			j.ID, j.Status, j.Progress, speed, j.Filename,
 		))
 	}
 	b.sendText(ctx, peer, sb.String())
@@ -565,6 +571,26 @@ func (b *Bot) sendText(ctx context.Context, peer tg.InputPeerClass, text string)
 	})
 	if err != nil {
 		log.Printf("sendText error: %v", err)
+	}
+}
+
+// sendNotify sends a status notification using the bot's root context so that
+// it succeeds even when the job's own context has been cancelled.
+func (b *Bot) sendNotify(peer tg.InputPeerClass, text string) {
+	ctx, cancel := context.WithTimeout(b.rootCtx, 30*time.Second)
+	defer cancel()
+	b.sendText(ctx, peer, text)
+}
+
+// fmtSpeed formats bytes-per-second as a human-readable string.
+func fmtSpeed(bps int64) string {
+	switch {
+	case bps >= 1024*1024:
+		return fmt.Sprintf("%.1f MB/s", float64(bps)/(1024*1024))
+	case bps >= 1024:
+		return fmt.Sprintf("%.1f KB/s", float64(bps)/1024)
+	default:
+		return fmt.Sprintf("%d B/s", bps)
 	}
 }
 

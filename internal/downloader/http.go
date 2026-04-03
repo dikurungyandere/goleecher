@@ -12,7 +12,8 @@ import (
 )
 
 // DownloadHTTP downloads a URL to destDir using gdl and returns the local file path.
-func DownloadHTTP(ctx context.Context, url, destDir string, progress jobs.ProgressFunc) (string, error) {
+// nameCallback, if non-nil, is called with the resolved filename before the download begins.
+func DownloadHTTP(ctx context.Context, url, destDir string, progress jobs.ProgressFunc, nameCallback func(string)) (string, error) {
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return "", fmt.Errorf("mkdir: %w", err)
 	}
@@ -27,6 +28,11 @@ func DownloadHTTP(ctx context.Context, url, destDir string, progress jobs.Progre
 	if filename == "" {
 		filename = "download"
 	}
+
+	if nameCallback != nil {
+		nameCallback(filename)
+	}
+
 	destPath := filepath.Join(destDir, filename)
 
 	var progressCallback gdl.ProgressCallback
