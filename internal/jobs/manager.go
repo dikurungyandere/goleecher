@@ -39,6 +39,15 @@ func (m *Manager) NewJob(ctx context.Context, userID, chatID int64, url string) 
 	return job, jobCtx, cancel
 }
 
+// SetFilename sets the filename for a job (called when the filename is known before download completes).
+func (m *Manager) SetFilename(id, filename string) {
+	m.st.Update(id, func(j *store.Job) {
+		if filename != "" {
+			j.Filename = filename
+		}
+	})
+}
+
 // SetDownloading marks a job as downloading.
 func (m *Manager) SetDownloading(id string) {
 	m.st.Update(id, func(j *store.Job) {

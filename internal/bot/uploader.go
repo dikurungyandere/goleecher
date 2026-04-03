@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/gotd/td/tg"
 
@@ -98,6 +99,13 @@ func (u *uploader) uploadFile(ctx context.Context, filePath, filename string, si
 	var wg sync.WaitGroup
 	var uploaded int64
 
+	// abort is closed when a worker encounters an error so the reader can unblock.
+	abort := make(chan struct{})
+	var abortOnce sync.Once
+	doAbort := func() { abortOnce.Do(func() { close(abort) }) }
+
+	startTime := time.Now()
+
 	// Worker goroutines
 	for w := 0; w < uploadWorkers; w++ {
 		wg.Add(1)
@@ -127,11 +135,17 @@ func (u *uploader) uploadFile(ctx context.Context, filePath, filename string, si
 				}
 				if werr != nil {
 					uploadErr.Store(werr)
+					doAbort()
 					return
 				}
-				atomic.AddInt64(&uploaded, int64(len(pw.data)))
+				cur := atomic.AddInt64(&uploaded, int64(len(pw.data)))
 				if progress != nil {
-					progress(atomic.LoadInt64(&uploaded), size, 0)
+					elapsed := time.Since(startTime).Seconds()
+					var speed int64
+					if elapsed > 0 {
+						speed = int64(float64(cur) / elapsed)
+					}
+					progress(cur, size, speed)
 				}
 			}
 		}()
@@ -163,7 +177,22 @@ func (u *uploader) uploadFile(ctx context.Context, filePath, filename string, si
 
 		data := make([]byte, n)
 		copy(data, buf[:n])
-		workCh <- partWork{index: partIdx, data: data}
+
+		// Use select so we don't block forever if workers have stopped.
+		select {
+		case workCh <- partWork{index: partIdx, data: data}:
+		case <-ctx.Done():
+			close(workCh)
+			wg.Wait()
+			return nil, ctx.Err()
+		case <-abort:
+			close(workCh)
+			wg.Wait()
+			if v := uploadErr.Load(); v != nil {
+				return nil, v.(error)
+			}
+			return nil, fmt.Errorf("upload aborted")
+		}
 	}
 
 	close(workCh)
