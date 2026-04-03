@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"path/filepath"
+	"sync"
 
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
@@ -15,6 +16,13 @@ import (
 	"github.com/dikurungyandere/goleecher/internal/store"
 )
 
+// statusEntry tracks the active status message and auto-refresh goroutine for a chat.
+type statusEntry struct {
+	msgID  int
+	peer   tg.InputPeerClass
+	cancel func() // cancels the auto-refresh goroutine
+}
+
 // Bot holds all bot state and dependencies.
 type Bot struct {
 	cfg     *config.Config
@@ -22,14 +30,18 @@ type Bot struct {
 	manager *jobs.Manager
 	api     *tg.Client      // set in Run before updates are dispatched
 	rootCtx context.Context // bot lifetime context, set in Run
+
+	statusMu    sync.Mutex
+	statusState map[int64]*statusEntry // chatID -> active status message state
 }
 
 // New creates a new Bot instance.
 func New(cfg *config.Config, st *store.Store) *Bot {
 	return &Bot{
-		cfg:     cfg,
-		st:      st,
-		manager: jobs.New(st),
+		cfg:         cfg,
+		st:          st,
+		manager:     jobs.New(st),
+		statusState: make(map[int64]*statusEntry),
 	}
 }
 

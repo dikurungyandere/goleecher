@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,6 +48,9 @@ func (h *updateHandler) handle(ctx context.Context, u tg.UpdatesClass) error {
 					h.handleMessage(ctx, msg, userMap, chanMap)
 				}
 			}
+			if cb, ok := update.(*tg.UpdateBotCallbackQuery); ok {
+				h.handleCallbackQuery(ctx, cb)
+			}
 		}
 
 	case *tg.UpdatesCombined:
@@ -67,6 +71,9 @@ func (h *updateHandler) handle(ctx context.Context, u tg.UpdatesClass) error {
 				if msg, ok := unm.Message.(*tg.Message); ok {
 					h.handleMessage(ctx, msg, userMap, chanMap)
 				}
+			}
+			if cb, ok := update.(*tg.UpdateBotCallbackQuery); ok {
+				h.handleCallbackQuery(ctx, cb)
 			}
 		}
 
@@ -195,7 +202,7 @@ func (h *updateHandler) dispatchCommand(ctx context.Context, msg *tg.Message, fr
 		}
 		bot.cmdLeechTorrentReply(ctx, fromID, chatID, peer, replyHeader.ReplyToMsgID, asDoc, asZip)
 	case "/status":
-		bot.cmdStatus(ctx, fromID, peer)
+		bot.cmdStatus(ctx, fromID, chatID, peer)
 	case "/cancel":
 		if len(parts) < 2 {
 			bot.sendText(ctx, peer, "Usage: /cancel <job_id>")
@@ -507,32 +514,262 @@ func (b *Bot) runJobDir(ctx context.Context, job *store.Job, peer tg.InputPeerCl
 	b.sendNotify(peer, fmt.Sprintf("✅ Job %s done! Uploaded %d file(s) from: %s", job.ID, len(allFiles), dirName))
 }
 
-// cmdStatus handles /status.
-func (b *Bot) cmdStatus(ctx context.Context, fromID int64, peer tg.InputPeerClass) {
+// cmdStatus handles /status — sends a single auto-refreshing status message per chat.
+func (b *Bot) cmdStatus(ctx context.Context, fromID, chatID int64, peer tg.InputPeerClass) {
 	if !b.st.IsAllowed(fromID) {
 		b.sendText(ctx, peer, "⛔ You are not authorized.")
 		return
 	}
 
-	active := b.st.Active()
-	if len(active) == 0 {
-		b.sendText(ctx, peer, "No active jobs.")
+	// Cancel the existing refresh goroutine and delete the old status message.
+	b.statusMu.Lock()
+	if old, ok := b.statusState[chatID]; ok {
+		old.cancel()
+		go b.deleteMessage(b.rootCtx, old.peer, old.msgID)
+	}
+	b.statusMu.Unlock()
+
+	active := b.st.ActiveSorted()
+	text := buildStatusText(active)
+	msgID, err := b.sendStatusMessage(ctx, peer, text)
+	if err != nil {
+		log.Printf("cmdStatus: send: %v", err)
 		return
 	}
 
-	var sb strings.Builder
-	sb.WriteString("📋 Active jobs:\n\n")
-	for _, j := range active {
-		speed := ""
-		if j.Speed > 0 {
-			speed = " @ " + fmtSpeed(j.Speed)
-		}
-		sb.WriteString(fmt.Sprintf(
-			"• %s [%s] %.1f%%%s — %s\n",
-			j.ID, j.Status, j.Progress, speed, j.Filename,
-		))
+	refreshCtx, cancelRefresh := context.WithCancel(b.rootCtx)
+	b.statusMu.Lock()
+	b.statusState[chatID] = &statusEntry{
+		msgID:  msgID,
+		peer:   peer,
+		cancel: cancelRefresh,
 	}
-	b.sendText(ctx, peer, sb.String())
+	b.statusMu.Unlock()
+
+	if len(active) > 0 {
+		go b.runStatusRefresh(refreshCtx, chatID)
+	}
+}
+
+// runStatusRefresh edits the status message every 5 seconds until the context is
+// cancelled or there are no more active jobs.
+func (b *Bot) runStatusRefresh(ctx context.Context, chatID int64) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			b.statusMu.Lock()
+			entry, ok := b.statusState[chatID]
+			b.statusMu.Unlock()
+			if !ok {
+				return
+			}
+
+			active := b.st.ActiveSorted()
+			text := buildStatusText(active)
+			apiCtx, cancel := context.WithTimeout(b.rootCtx, 30*time.Second)
+			b.editStatusMessage(apiCtx, entry.peer, entry.msgID, text)
+			cancel()
+
+			if len(active) == 0 {
+				return
+			}
+		}
+	}
+}
+
+// handleCallbackQuery handles inline button presses (e.g. the Refresh button).
+func (h *updateHandler) handleCallbackQuery(ctx context.Context, query *tg.UpdateBotCallbackQuery) {
+	bot := h.bot
+
+	// Always answer the callback to remove the loading indicator.
+	defer func() {
+		apiCtx, cancel := context.WithTimeout(bot.rootCtx, 10*time.Second)
+		defer cancel()
+		_, _ = bot.api.MessagesSetBotCallbackAnswer(apiCtx, &tg.MessagesSetBotCallbackAnswerRequest{
+			QueryID: query.QueryID,
+		})
+	}()
+
+	if string(query.Data) != "refresh_status" {
+		return
+	}
+	if !bot.st.IsAllowed(query.UserID) {
+		return
+	}
+
+	var chatID int64
+	switch p := query.Peer.(type) {
+	case *tg.PeerUser:
+		chatID = p.UserID
+	case *tg.PeerChat:
+		chatID = p.ChatID
+	case *tg.PeerChannel:
+		chatID = p.ChannelID
+	default:
+		return
+	}
+
+	bot.statusMu.Lock()
+	entry, ok := bot.statusState[chatID]
+	bot.statusMu.Unlock()
+
+	if !ok || entry.msgID != query.MsgID {
+		return
+	}
+
+	active := bot.st.ActiveSorted()
+	text := buildStatusText(active)
+	bot.editStatusMessage(ctx, entry.peer, entry.msgID, text)
+}
+
+// statusInlineMarkup returns the inline keyboard with a Refresh button.
+func statusInlineMarkup() *tg.ReplyInlineMarkup {
+	return &tg.ReplyInlineMarkup{
+		Rows: []tg.KeyboardButtonRow{
+			{
+				Buttons: []tg.KeyboardButtonClass{
+					&tg.KeyboardButtonCallback{
+						Text: "🔄 Refresh",
+						Data: []byte("refresh_status"),
+					},
+				},
+			},
+		},
+	}
+}
+
+// sendStatusMessage sends a status message with the inline refresh keyboard and
+// returns the new message ID.
+func (b *Bot) sendStatusMessage(ctx context.Context, peer tg.InputPeerClass, text string) (int, error) {
+	result, err := b.api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+		Peer:        peer,
+		Message:     text,
+		RandomID:    cryptoRandInt63(),
+		ReplyMarkup: statusInlineMarkup(),
+	})
+	if err != nil {
+		return 0, err
+	}
+	return extractMessageID(result), nil
+}
+
+// editStatusMessage edits an existing status message in-place.
+func (b *Bot) editStatusMessage(ctx context.Context, peer tg.InputPeerClass, msgID int, text string) {
+	_, err := b.api.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
+		Peer:        peer,
+		ID:          msgID,
+		Message:     text,
+		ReplyMarkup: statusInlineMarkup(),
+	})
+	if err != nil {
+		log.Printf("editStatusMessage: %v", err)
+	}
+}
+
+// deleteMessage deletes a single message. For channels it uses the channel-specific API.
+func (b *Bot) deleteMessage(ctx context.Context, peer tg.InputPeerClass, msgID int) {
+	switch p := peer.(type) {
+	case *tg.InputPeerChannel:
+		_, err := b.api.ChannelsDeleteMessages(ctx, &tg.ChannelsDeleteMessagesRequest{
+			Channel: &tg.InputChannel{
+				ChannelID:  p.ChannelID,
+				AccessHash: p.AccessHash,
+			},
+			ID: []int{msgID},
+		})
+		if err != nil {
+			log.Printf("deleteMessage (channel): %v", err)
+		}
+	default:
+		_, err := b.api.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{
+			Revoke: true,
+			ID:     []int{msgID},
+		})
+		if err != nil {
+			log.Printf("deleteMessage: %v", err)
+		}
+	}
+}
+
+// extractMessageID pulls the real message ID out of an UpdatesClass response
+// returned by MessagesSendMessage.
+func extractMessageID(upds tg.UpdatesClass) int {
+	switch u := upds.(type) {
+	case *tg.Updates:
+		for _, upd := range u.Updates {
+			switch v := upd.(type) {
+			case *tg.UpdateMessageID:
+				return v.ID
+			case *tg.UpdateNewMessage:
+				if msg, ok := v.Message.(*tg.Message); ok {
+					return msg.ID
+				}
+			}
+		}
+	case *tg.UpdateShortSentMessage:
+		return u.ID
+	}
+	return 0
+}
+
+// buildStatusText formats the list of active jobs into a human-readable status string
+// including a progress bar for each job.
+func buildStatusText(active []*store.Job) string {
+	if len(active) == 0 {
+		return "✅ No active jobs."
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("📋 Active jobs (%d):\n\n", len(active)))
+	for _, j := range active {
+		sb.WriteString(fmt.Sprintf("• %s [%s]\n", j.ID, j.Status))
+		if j.Filename != "" {
+			sb.WriteString(fmt.Sprintf("  📄 %s\n", j.Filename))
+		}
+		bar := makeProgressBar(j.Progress, 10)
+		line := fmt.Sprintf("  %s %.1f%%", bar, j.Progress)
+		if j.Speed > 0 {
+			line += " @ " + fmtSpeed(j.Speed)
+		}
+		if j.TotalBytes > 0 {
+			line += fmt.Sprintf(" (%s / %s)", fmtBytes(j.DoneBytes), fmtBytes(j.TotalBytes))
+		}
+		sb.WriteString(line + "\n\n")
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// makeProgressBar returns a text progress bar like [████░░░░░░] for the given percentage.
+func makeProgressBar(pct float64, width int) string {
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	filled := int(math.Round(pct / 100 * float64(width)))
+	if filled > width {
+		filled = width
+	}
+	return "[" + strings.Repeat("█", filled) + strings.Repeat("░", width-filled) + "]"
+}
+
+// fmtBytes formats a byte count as a human-readable string.
+func fmtBytes(b int64) string {
+	switch {
+	case b >= 1024*1024*1024:
+		return fmt.Sprintf("%.1f GB", float64(b)/(1024*1024*1024))
+	case b >= 1024*1024:
+		return fmt.Sprintf("%.1f MB", float64(b)/(1024*1024))
+	case b >= 1024:
+		return fmt.Sprintf("%.1f KB", float64(b)/1024)
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
 }
 
 // cmdCancel handles /cancel.

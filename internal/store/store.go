@@ -1,6 +1,7 @@
 package store
 
 import (
+	"sort"
 	"sync"
 	"time"
 )
@@ -111,6 +112,15 @@ func (s *Store) Active() []*Job {
 		}
 	}
 	return out
+}
+
+// ActiveSorted returns active jobs sorted by creation time (oldest first).
+func (s *Store) ActiveSorted() []*Job {
+	jobs := s.Active()
+	sort.Slice(jobs, func(i, j int) bool {
+		return jobs[i].CreatedAt.Before(jobs[j].CreatedAt)
+	})
+	return jobs
 }
 
 func (s *Store) CancelAll() {
