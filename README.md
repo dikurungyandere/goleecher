@@ -37,6 +37,22 @@ All configuration is done via environment variables:
 | `PORT` | ❌ | `8080` | Port for the web dashboard (only used when `WEB_ENABLED=true`) |
 | `TEMP_DIR` | ❌ | `/tmp/goleecher` | Directory for temporary download files |
 
+You can also put these variables in a `.env` file in the project root (recommended for local development).  
+The app loads `.env` automatically at startup without overriding variables already set in your shell.
+
+Example `.env`:
+
+```env
+API_ID=12345678
+API_HASH=your_api_hash_here
+BOT_TOKEN=your_bot_token_here
+ADMIN_ID=123456789
+ALLOWED_IDS=123456789,987654321
+WEB_ENABLED=true
+PORT=8080
+TEMP_DIR=/tmp/goleecher
+```
+
 ## Running
 
 ### From source

@@ -7,6 +7,8 @@ require (
 	github.com/gotd/td v0.142.0
 )
 
+require github.com/joho/godotenv v1.5.1 // indirect
+
 require (
 	github.com/RoaringBitmap/roaring v1.2.3 // indirect
 	github.com/alecthomas/atomic v0.1.0-alpha2 // indirect

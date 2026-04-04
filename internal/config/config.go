@@ -4,6 +4,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/joho/godotenv"
 )
 
 type Config struct {
@@ -18,6 +20,9 @@ type Config struct {
 }
 
 func Load() *Config {
+	// Load .env file if it exists (does not override existing env vars)
+	_ = godotenv.Load()
+
 	apiID, _ := strconv.Atoi(os.Getenv("API_ID"))
 	adminID, _ := strconv.ParseInt(os.Getenv("ADMIN_ID"), 10, 64)
 

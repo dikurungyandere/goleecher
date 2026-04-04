@@ -233,11 +233,11 @@ func (b *Bot) cmdLeech(ctx context.Context, fromID, chatID int64, peer tg.InputP
 	job, jobCtx, cancel := b.manager.NewJob(b.rootCtx, fromID, chatID, url, cmdMsgID)
 	_ = cancel
 
-	// Send initial status message (will be updated with progress)
-	statusMsgID := b.sendJobStatusMessage(ctx, peer, job, cmdMsgID)
+	// Show all-jobs status (like /status) and manage the shared status message
+	b.showStatusAfterLeech(ctx, chatID, peer)
 
 	go func() {
-		b.runJob(jobCtx, job, peer, statusMsgID, asDoc, asZip)
+		b.runJob(jobCtx, job, peer, asDoc, asZip)
 	}()
 }
 
@@ -280,17 +280,47 @@ func (b *Bot) cmdLeechTorrentReply(ctx context.Context, fromID, chatID int64, pe
 	job, jobCtx, cancel := b.manager.NewJob(b.rootCtx, fromID, chatID, torrentDocumentFilename(doc), cmdMsgID)
 	_ = cancel
 
-	// Send initial status message (will be updated with progress)
-	statusMsgID := b.sendJobStatusMessage(ctx, peer, job, cmdMsgID)
+	// Show all-jobs status (like /status) and manage the shared status message
+	b.showStatusAfterLeech(ctx, chatID, peer)
 
 	go func() {
-		b.runJobFromTorrentDocument(jobCtx, job, peer, statusMsgID, doc, asDoc, asZip)
+		b.runJobFromTorrentDocument(jobCtx, job, peer, doc, asDoc, asZip)
 	}()
 }
 
+// showStatusAfterLeech deletes any existing status message and sends a new all-jobs status.
+func (b *Bot) showStatusAfterLeech(ctx context.Context, chatID int64, peer tg.InputPeerClass) {
+	// Cancel existing refresh goroutine and delete old status message
+	b.statusMu.Lock()
+	if old, ok := b.statusState[chatID]; ok {
+		old.cancel()
+		go b.deleteMessage(b.rootCtx, old.peer, old.msgID)
+	}
+	b.statusMu.Unlock()
+
+	active := b.st.ActiveSorted()
+	text := buildStatusText(active)
+	msgID, err := b.sendStatusMessage(ctx, peer, text)
+	if err != nil {
+		log.Printf("showStatusAfterLeech: send: %v", err)
+		return
+	}
+
+	refreshCtx, cancelRefresh := context.WithCancel(b.rootCtx)
+	b.statusMu.Lock()
+	b.statusState[chatID] = &statusEntry{
+		msgID:    msgID,
+		peer:     peer,
+		cancel:   cancelRefresh,
+		lastText: text,
+	}
+	b.statusMu.Unlock()
+
+	go b.runStatusRefresh(refreshCtx, chatID)
+}
+
 // runJob executes a full download → upload cycle for a job.
-// statusMsgID is the message to edit with progress updates.
-func (b *Bot) runJob(ctx context.Context, job *store.Job, peer tg.InputPeerClass, statusMsgID int, asDoc, asZip bool) {
+func (b *Bot) runJob(ctx context.Context, job *store.Job, peer tg.InputPeerClass, asDoc, asZip bool) {
 	jobDir := filepath.Join(b.cfg.TempDir, job.ID)
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
 		b.manager.SetFailed(job.ID, err)
@@ -302,15 +332,14 @@ func (b *Bot) runJob(ctx context.Context, job *store.Job, peer tg.InputPeerClass
 	b.manager.SetDownloading(job.ID)
 	progressFn := b.manager.ProgressUpdater(job.ID)
 
-	// Start background goroutine to update status message periodically
-	stopProgress := b.startJobProgressUpdater(ctx, job.ID, peer, statusMsgID)
-	defer stopProgress()
-
 	var localPath string
 	var err error
 
 	if strings.HasPrefix(strings.ToLower(job.URL), "magnet:") {
 		localPath, err = downloader.DownloadTorrent(ctx, job.URL, jobDir, progressFn)
+	} else if downloader.IsTorrentURL(job.URL) {
+		// URL points to a .torrent file - download via torrent
+		localPath, err = downloader.DownloadTorrentURL(ctx, job.URL, jobDir, progressFn)
 	} else {
 		nameCallback := func(name string) { b.manager.SetFilename(job.ID, name) }
 		localPath, err = downloader.DownloadHTTP(ctx, job.URL, jobDir, progressFn, nameCallback)
@@ -319,20 +348,20 @@ func (b *Bot) runJob(ctx context.Context, job *store.Job, peer tg.InputPeerClass
 	if err != nil {
 		if ctx.Err() != nil {
 			// Already marked as cancelled by CancelJob
-			b.editJobFinalStatus(peer, statusMsgID, job, "🚫 Cancelled")
+			b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
 		} else {
 			b.manager.SetFailed(job.ID, err)
-			b.editJobFinalStatus(peer, statusMsgID, job, fmt.Sprintf("❌ Failed: %v", err))
+			b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
 		}
 		return
 	}
 
 	updr := newUploader(b.api, b.cfg, b.manager, job.ID)
-	b.runJobAfterDownload(ctx, job, peer, statusMsgID, localPath, asDoc, asZip, updr, progressFn)
+	b.runJobAfterDownload(ctx, job, peer, localPath, asDoc, asZip, updr, progressFn)
 }
 
 // runJobFromTorrentDocument downloads a .torrent document from Telegram and then runs the torrent.
-func (b *Bot) runJobFromTorrentDocument(ctx context.Context, job *store.Job, peer tg.InputPeerClass, statusMsgID int, doc *tg.Document, asDoc, asZip bool) {
+func (b *Bot) runJobFromTorrentDocument(ctx context.Context, job *store.Job, peer tg.InputPeerClass, doc *tg.Document, asDoc, asZip bool) {
 	jobDir := filepath.Join(b.cfg.TempDir, job.ID)
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
 		b.manager.SetFailed(job.ID, err)
@@ -344,19 +373,15 @@ func (b *Bot) runJobFromTorrentDocument(ctx context.Context, job *store.Job, pee
 	b.manager.SetDownloading(job.ID)
 	progressFn := b.manager.ProgressUpdater(job.ID)
 
-	// Start background goroutine to update status message periodically
-	stopProgress := b.startJobProgressUpdater(ctx, job.ID, peer, statusMsgID)
-	defer stopProgress()
-
 	// Download the .torrent file from Telegram first.
 	torrentFilePath := filepath.Join(jobDir, torrentDocumentFilename(doc))
 	if err := b.downloadTelegramDocument(ctx, doc, torrentFilePath); err != nil {
 		if ctx.Err() != nil {
 			// Already marked as cancelled by CancelJob
-			b.editJobFinalStatus(peer, statusMsgID, job, "🚫 Cancelled")
+			b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
 		} else {
 			b.manager.SetFailed(job.ID, err)
-			b.editJobFinalStatus(peer, statusMsgID, job, fmt.Sprintf("❌ Failed to fetch .torrent: %v", err))
+			b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("❌ Job %s failed to fetch .torrent: %v", job.ID, err))
 		}
 		return
 	}
@@ -365,29 +390,29 @@ func (b *Bot) runJobFromTorrentDocument(ctx context.Context, job *store.Job, pee
 	if err != nil {
 		if ctx.Err() != nil {
 			// Already marked as cancelled by CancelJob
-			b.editJobFinalStatus(peer, statusMsgID, job, "🚫 Cancelled")
+			b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
 		} else {
 			b.manager.SetFailed(job.ID, err)
-			b.editJobFinalStatus(peer, statusMsgID, job, fmt.Sprintf("❌ Failed: %v", err))
+			b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
 		}
 		return
 	}
 
 	updr := newUploader(b.api, b.cfg, b.manager, job.ID)
-	b.runJobAfterDownload(ctx, job, peer, statusMsgID, localPath, asDoc, asZip, updr, progressFn)
+	b.runJobAfterDownload(ctx, job, peer, localPath, asDoc, asZip, updr, progressFn)
 }
 
 // runJobAfterDownload handles stat → upload for a completed download.
-func (b *Bot) runJobAfterDownload(ctx context.Context, job *store.Job, peer tg.InputPeerClass, statusMsgID int, localPath string, asDoc, asZip bool, updr *uploader, progressFn jobs.ProgressFunc) {
+func (b *Bot) runJobAfterDownload(ctx context.Context, job *store.Job, peer tg.InputPeerClass, localPath string, asDoc, asZip bool, updr *uploader, progressFn jobs.ProgressFunc) {
 	info, err := os.Stat(localPath)
 	if err != nil {
 		b.manager.SetFailed(job.ID, err)
-		b.editJobFinalStatus(peer, statusMsgID, job, fmt.Sprintf("❌ Failed: %v", err))
+		b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
 		return
 	}
 
 	if info.IsDir() {
-		b.runJobDir(ctx, job, peer, statusMsgID, localPath, asDoc, asZip, updr, progressFn)
+		b.runJobDir(ctx, job, peer, localPath, asDoc, asZip, updr, progressFn)
 		return
 	}
 
@@ -397,22 +422,22 @@ func (b *Bot) runJobAfterDownload(ctx context.Context, job *store.Job, peer tg.I
 	if err := updr.Upload(ctx, localPath, filename, info.Size(), peer, asDoc, progressFn); err != nil {
 		if ctx.Err() != nil {
 			// Already marked as cancelled by CancelJob
-			b.editJobFinalStatus(peer, statusMsgID, job, "🚫 Cancelled")
+			b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
 		} else {
 			b.manager.SetFailed(job.ID, err)
-			b.editJobFinalStatus(peer, statusMsgID, job, fmt.Sprintf("❌ Upload failed: %v", err))
+			b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("❌ Job %s upload failed: %v", job.ID, err))
 		}
 		return
 	}
 
 	b.manager.SetDone(job.ID, info.Size())
-	b.editJobFinalStatus(peer, statusMsgID, job, fmt.Sprintf("✅ Done! Uploaded: %s", filename))
+	b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("✅ Job %s done! Uploaded: %s", job.ID, filename))
 }
 
 // runJobDir handles uploading for a multi-file torrent (directory result).
 // If asZip is true, all files are zipped into a single archive before upload.
 // Otherwise, each file is uploaded individually with cumulative progress tracking.
-func (b *Bot) runJobDir(ctx context.Context, job *store.Job, peer tg.InputPeerClass, statusMsgID int, dirPath string, asDoc, asZip bool, updr *uploader, progressFn jobs.ProgressFunc) {
+func (b *Bot) runJobDir(ctx context.Context, job *store.Job, peer tg.InputPeerClass, dirPath string, asDoc, asZip bool, updr *uploader, progressFn jobs.ProgressFunc) {
 	dirName := filepath.Base(dirPath)
 
 	if asZip {
@@ -420,14 +445,14 @@ func (b *Bot) runJobDir(ctx context.Context, job *store.Job, peer tg.InputPeerCl
 		b.manager.SetFilename(job.ID, dirName+".zip (creating)")
 		if err := zipDir(dirPath, zipPath); err != nil {
 			b.manager.SetFailed(job.ID, err)
-			b.editJobFinalStatus(peer, statusMsgID, job, fmt.Sprintf("❌ Failed to create zip: %v", err))
+			b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("❌ Job %s failed to create zip: %v", job.ID, err))
 			return
 		}
 
 		zipInfo, err := os.Stat(zipPath)
 		if err != nil {
 			b.manager.SetFailed(job.ID, err)
-			b.editJobFinalStatus(peer, statusMsgID, job, fmt.Sprintf("❌ Failed: %v", err))
+			b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
 			return
 		}
 
@@ -437,16 +462,16 @@ func (b *Bot) runJobDir(ctx context.Context, job *store.Job, peer tg.InputPeerCl
 		if err := updr.Upload(ctx, zipPath, filename, zipInfo.Size(), peer, asDoc, progressFn); err != nil {
 			if ctx.Err() != nil {
 				// Already marked as cancelled by CancelJob
-				b.editJobFinalStatus(peer, statusMsgID, job, "🚫 Cancelled")
+				b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
 			} else {
 				b.manager.SetFailed(job.ID, err)
-				b.editJobFinalStatus(peer, statusMsgID, job, fmt.Sprintf("❌ Upload failed: %v", err))
+				b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("❌ Job %s upload failed: %v", job.ID, err))
 			}
 			return
 		}
 
 		b.manager.SetDone(job.ID, zipInfo.Size())
-		b.editJobFinalStatus(peer, statusMsgID, job, fmt.Sprintf("✅ Done! Uploaded: %s", filename))
+		b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("✅ Job %s done! Uploaded: %s", job.ID, filename))
 		return
 	}
 
@@ -465,13 +490,13 @@ func (b *Bot) runJobDir(ctx context.Context, job *store.Job, peer tg.InputPeerCl
 		return nil
 	}); err != nil {
 		b.manager.SetFailed(job.ID, err)
-		b.editJobFinalStatus(peer, statusMsgID, job, fmt.Sprintf("❌ Failed: %v", err))
+		b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
 		return
 	}
 
 	if len(allFiles) == 0 {
 		b.manager.SetFailed(job.ID, fmt.Errorf("no files in torrent directory"))
-		b.editJobFinalStatus(peer, statusMsgID, job, "❌ No files found in torrent.")
+		b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("❌ Job %s: no files found in torrent.", job.ID))
 		return
 	}
 
@@ -481,21 +506,21 @@ func (b *Bot) runJobDir(ctx context.Context, job *store.Job, peer tg.InputPeerCl
 	for _, filePath := range allFiles {
 		if ctx.Err() != nil {
 			// Already marked as cancelled by CancelJob
-			b.editJobFinalStatus(peer, statusMsgID, job, "🚫 Cancelled")
+			b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
 			return
 		}
 
 		fi, err := os.Stat(filePath)
 		if err != nil {
 			b.manager.SetFailed(job.ID, err)
-			b.editJobFinalStatus(peer, statusMsgID, job, fmt.Sprintf("❌ Failed: %v", err))
+			b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
 			return
 		}
 
 		rel, err := filepath.Rel(dirPath, filePath)
 		if err != nil {
 			b.manager.SetFailed(job.ID, err)
-			b.editJobFinalStatus(peer, statusMsgID, job, fmt.Sprintf("❌ Failed: %v", err))
+			b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("❌ Job %s failed: %v", job.ID, err))
 			return
 		}
 		rel = filepath.ToSlash(rel)
@@ -510,10 +535,10 @@ func (b *Bot) runJobDir(ctx context.Context, job *store.Job, peer tg.InputPeerCl
 		if err := updr.Upload(ctx, filePath, rel, fileSize, peer, asDoc, wrapped); err != nil {
 			if ctx.Err() != nil {
 				// Already marked as cancelled by CancelJob
-				b.editJobFinalStatus(peer, statusMsgID, job, "🚫 Cancelled")
+				b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("🚫 Job %s cancelled.", job.ID))
 			} else {
 				b.manager.SetFailed(job.ID, err)
-				b.editJobFinalStatus(peer, statusMsgID, job, fmt.Sprintf("❌ Upload failed: %v", err))
+				b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("❌ Job %s upload failed: %v", job.ID, err))
 			}
 			return
 		}
@@ -521,7 +546,7 @@ func (b *Bot) runJobDir(ctx context.Context, job *store.Job, peer tg.InputPeerCl
 	}
 
 	b.manager.SetDone(job.ID, totalSize)
-	b.editJobFinalStatus(peer, statusMsgID, job, fmt.Sprintf("✅ Done! Uploaded %d file(s) from: %s", len(allFiles), dirName))
+	b.sendReply(peer, job.ReplyToMsg, fmt.Sprintf("✅ Job %s done! Uploaded %d file(s) from: %s", job.ID, len(allFiles), dirName))
 }
 
 // cmdStatus handles /status — sends a single auto-refreshing status message per chat.
@@ -868,93 +893,6 @@ func cryptoRandInt63() int64 {
 	return v
 }
 
-// sendJobStatusMessage sends an initial job status message replying to the command.
-// Returns the message ID for future edits.
-func (b *Bot) sendJobStatusMessage(ctx context.Context, peer tg.InputPeerClass, job *store.Job, replyTo int) int {
-	text := buildSingleJobStatus(job)
-	result, err := b.api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
-		Peer:       peer,
-		Message:    text,
-		RandomID:   cryptoRandInt63(),
-		ReplyTo:    &tg.InputReplyToMessage{ReplyToMsgID: replyTo},
-	})
-	if err != nil {
-		log.Printf("sendJobStatusMessage: %v", err)
-		return 0
-	}
-	return extractMessageID(result)
-}
-
-// startJobProgressUpdater starts a goroutine that updates the status message periodically.
-// Returns a stop function that should be called when the job completes.
-func (b *Bot) startJobProgressUpdater(ctx context.Context, jobID string, peer tg.InputPeerClass, msgID int) func() {
-	if msgID == 0 {
-		return func() {}
-	}
-
-	stopCh := make(chan struct{})
-	var lastText string
-
-	go func() {
-		ticker := time.NewTicker(3 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-stopCh:
-				return
-			case <-ticker.C:
-				job, ok := b.st.Get(jobID)
-				if !ok {
-					return
-				}
-				text := buildSingleJobStatus(job)
-				if text != lastText {
-					lastText = text
-					apiCtx, cancel := context.WithTimeout(b.rootCtx, 10*time.Second)
-					_, err := b.api.MessagesEditMessage(apiCtx, &tg.MessagesEditMessageRequest{
-						Peer:    peer,
-						ID:      msgID,
-						Message: text,
-					})
-					cancel()
-					if err != nil && !strings.Contains(err.Error(), "MESSAGE_NOT_MODIFIED") {
-						log.Printf("job progress update: %v", err)
-					}
-				}
-			}
-		}
-	}()
-
-	return func() { close(stopCh) }
-}
-
-// editJobFinalStatus edits the job status message with the final result and replies to original command.
-func (b *Bot) editJobFinalStatus(peer tg.InputPeerClass, msgID int, job *store.Job, result string) {
-	text := fmt.Sprintf("Job %s: %s", job.ID, result)
-	if job.Filename != "" {
-		text = fmt.Sprintf("Job %s [%s]: %s", job.ID, job.Filename, result)
-	}
-
-	if msgID != 0 {
-		apiCtx, cancel := context.WithTimeout(b.rootCtx, 30*time.Second)
-		_, err := b.api.MessagesEditMessage(apiCtx, &tg.MessagesEditMessageRequest{
-			Peer:    peer,
-			ID:      msgID,
-			Message: text,
-		})
-		cancel()
-		if err != nil && !strings.Contains(err.Error(), "MESSAGE_NOT_MODIFIED") {
-			log.Printf("editJobFinalStatus: %v", err)
-		}
-	} else {
-		// Fallback: send as reply if we don't have a status message
-		b.sendReply(peer, job.ReplyToMsg, text)
-	}
-}
-
 // sendReply sends a message replying to a specific message ID.
 func (b *Bot) sendReply(peer tg.InputPeerClass, replyTo int, text string) {
 	ctx, cancel := context.WithTimeout(b.rootCtx, 30*time.Second)
@@ -973,30 +911,4 @@ func (b *Bot) sendReply(peer tg.InputPeerClass, replyTo int, text string) {
 	if err != nil {
 		log.Printf("sendReply error: %v", err)
 	}
-}
-
-// buildSingleJobStatus formats a single job's status for display.
-func buildSingleJobStatus(j *store.Job) string {
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("📥 Job %s [%s]\n", j.ID, j.Status))
-	if j.Filename != "" {
-		sb.WriteString(fmt.Sprintf("📄 %s\n", j.Filename))
-	} else if j.URL != "" {
-		// Show truncated URL if no filename yet
-		url := j.URL
-		if len(url) > 50 {
-			url = url[:47] + "..."
-		}
-		sb.WriteString(fmt.Sprintf("🔗 %s\n", url))
-	}
-	bar := makeProgressBar(j.Progress, 10)
-	line := fmt.Sprintf("%s %.1f%%", bar, j.Progress)
-	if j.Speed > 0 {
-		line += " @ " + fmtSpeed(j.Speed)
-	}
-	if j.TotalBytes > 0 {
-		line += fmt.Sprintf(" (%s / %s)", fmtBytes(j.DoneBytes), fmtBytes(j.TotalBytes))
-	}
-	sb.WriteString(line)
-	return sb.String()
 }
