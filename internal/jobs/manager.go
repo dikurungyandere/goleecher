@@ -24,16 +24,18 @@ func New(st *store.Store) *Manager {
 }
 
 // NewJob creates a new job, registers it in the store, and returns it.
-func (m *Manager) NewJob(ctx context.Context, userID, chatID int64, url string) (*store.Job, context.Context, context.CancelFunc) {
+// replyToMsg is the message ID that the final status should reply to.
+func (m *Manager) NewJob(ctx context.Context, userID, chatID int64, url string, replyToMsg int) (*store.Job, context.Context, context.CancelFunc) {
 	jobCtx, cancel := context.WithCancel(ctx)
 	job := &store.Job{
-		ID:        newID(),
-		UserID:    userID,
-		ChatID:    chatID,
-		URL:       url,
-		Status:    store.StatusPending,
-		CreatedAt: time.Now(),
-		Cancel:    cancel,
+		ID:         newID(),
+		UserID:     userID,
+		ChatID:     chatID,
+		URL:        url,
+		Status:     store.StatusPending,
+		CreatedAt:  time.Now(),
+		Cancel:     cancel,
+		ReplyToMsg: replyToMsg,
 	}
 	m.st.Add(job)
 	return job, jobCtx, cancel
@@ -105,7 +107,8 @@ func (m *Manager) ProgressUpdater(id string) ProgressFunc {
 	}
 }
 
-// CancelJob cancels a single job by ID. Returns error if not found or not cancellable.
+// CancelJob cancels a single job by ID and marks it as cancelled.
+// Returns error if not found or not cancellable.
 func (m *Manager) CancelJob(id string, requesterID int64) error {
 	j, ok := m.st.Get(id)
 	if !ok {
@@ -122,6 +125,7 @@ func (m *Manager) CancelJob(id string, requesterID int64) error {
 	if j.Cancel != nil {
 		j.Cancel()
 	}
+	m.SetCancelled(id)
 	return nil
 }
 

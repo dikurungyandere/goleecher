@@ -31,6 +31,7 @@ type Job struct {
 	Error      string    `json:"error,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 	Cancel     func()    `json:"-"`
+	ReplyToMsg int       `json:"-"` // message ID to reply to for final status
 }
 
 type Store struct {

@@ -18,9 +18,10 @@ import (
 
 // statusEntry tracks the active status message and auto-refresh goroutine for a chat.
 type statusEntry struct {
-	msgID  int
-	peer   tg.InputPeerClass
-	cancel func() // cancels the auto-refresh goroutine
+	msgID    int
+	peer     tg.InputPeerClass
+	cancel   func() // cancels the auto-refresh goroutine
+	lastText string // last text sent, to avoid MESSAGE_NOT_MODIFIED errors
 }
 
 // Bot holds all bot state and dependencies.
