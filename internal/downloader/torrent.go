@@ -76,21 +76,31 @@ func DownloadTorrent(ctx context.Context, magnetURI, destDir string, progress jo
 	if err != nil {
 		return "", err
 	}
-	defer releaseSharedClient()
 
 	spec, err := gotorrent.TorrentSpecFromMagnetUri(magnetURI)
 	if err != nil {
+		releaseSharedClient()
 		return "", fmt.Errorf("parse magnet: %w", err)
 	}
 	spec.Storage = storage.NewFile(destDir)
 
 	t, _, err := client.AddTorrentSpec(spec)
 	if err != nil {
+		releaseSharedClient()
 		return "", fmt.Errorf("add magnet: %w", err)
 	}
-	defer t.Drop()
 
-	return runTorrentDownload(ctx, t, destDir, progress)
+	result, err := runTorrentDownload(ctx, t, destDir, progress)
+
+	// Drop the torrent and release the client BEFORE returning.
+	// This ensures the torrent's timers are stopped before the caller
+	// might clean up the download directory.
+	t.Drop()
+	// Brief pause to let any pending timer callbacks complete after Drop.
+	time.Sleep(100 * time.Millisecond)
+	releaseSharedClient()
+
+	return result, err
 }
 
 // DownloadTorrentFile downloads using a local .torrent file to destDir.
@@ -104,10 +114,10 @@ func DownloadTorrentFile(ctx context.Context, torrentPath, destDir string, progr
 	if err != nil {
 		return "", err
 	}
-	defer releaseSharedClient()
 
 	mi, err := metainfo.LoadFromFile(torrentPath)
 	if err != nil {
+		releaseSharedClient()
 		return "", fmt.Errorf("load torrent file: %w", err)
 	}
 
@@ -116,11 +126,21 @@ func DownloadTorrentFile(ctx context.Context, torrentPath, destDir string, progr
 
 	t, _, err := client.AddTorrentSpec(spec)
 	if err != nil {
+		releaseSharedClient()
 		return "", fmt.Errorf("add torrent: %w", err)
 	}
-	defer t.Drop()
 
-	return runTorrentDownload(ctx, t, destDir, progress)
+	result, err := runTorrentDownload(ctx, t, destDir, progress)
+
+	// Drop the torrent and release the client BEFORE returning.
+	// This ensures the torrent's timers are stopped before the caller
+	// might clean up the download directory.
+	t.Drop()
+	// Brief pause to let any pending timer callbacks complete after Drop.
+	time.Sleep(100 * time.Millisecond)
+	releaseSharedClient()
+
+	return result, err
 }
 
 // DownloadTorrentURL downloads a .torrent file from a URL and then downloads its content.
